@@ -1,0 +1,27 @@
+Component;Group;MolWeight
+12:0;;214,39
+14:0;unsp_microb;242,39
+i15:0;firmicutes;256,42
+a15:0;firmicutes;256,42
+15:0;unsp_microb;256,42
+3-OH 14:0;;258
+i16:0;firmicutes;270,44
+16:3w3;;264,4
+16:1w7;Gneg;268,43
+16:1w5;AMF;268
+16:0;unsp_microb;270,44
+i17:0;firmicutes;284,47
+17:1;;282,45
+cy17:0;Gneg;282,45
+17:0;unsp_microb;284,47
+18:2w6,9;AscoBasio;294,47
+18:1w9, 18:3w3, 18:2w6t;Zygomycota;296,48
+18:1w7, 18:1w9t;Gneg;296,48
+18:0;unsp_microb;29849
+cy19:0;Gneg;31048
+20:4w6;unsp_microb;318
+20:5w3;;316
+20:0;unsp_microb;324,49
+21:0;;340,49
+22:0;;354,49
+24:0;;382,49

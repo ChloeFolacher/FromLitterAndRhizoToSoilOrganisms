@@ -1,0 +1,460 @@
+---
+title: "Fluxing I & II"
+output: html_document
+date: "2025-10-10"
+---
+
+```{r packages}
+library(readxl)
+library(knitr)
+library(tidyverse)
+```
+
+
+```{r load-and-source}
+source("FUN_fluxes_calculation.R")
+load("object/full.M.MN.kJ.d.Rdata")
+```
+
+
+# Determining microbes/basal interactions factors --------------------------------------------
+
+## Pre-fluxing to determine the losses for each microbial node
+
+```{r output-PRE-fluxing, message=F, warning = F}
+
+#in this matrix, bacteria and fungi are considered as basal resources (no consumption )
+mat.pred.as.line.apriori <- read_excel("SFW_data_tidy/Matrix.xlsx", sheet = "a priori")
+
+full.M.MN.ap <- 
+  full.M.MN.kJ.d %>% 
+  filter(! Group %in% c("P.Rh", "P.dL", "S")) %>% 
+  mutate(MetabolicNeed = 
+           if_else(Group %in% c("B.Gpos", "B.Gneg", "F.s", "F.amf"),
+                   true = 0,
+                   false = MetabolicNeed)
+         )
+
+mat.fluxes.ap <- mat.fluxes_calculation(full.M.MN.ap, 
+                                        mat.pred.as.line.apriori,
+                                        microbes.as.consumers = FALSE)
+
+complete_fluxes.ap <- complete_fluxes_calculation(mat.fluxes.ap)
+
+```
+
+
+## Overview
+
+We did not determine microbial preferences but rather directly the interaction, from the labelling. 13C pulse labelling was used to characterise the relative preference of rhizodeposits ($Rh$) compared to resources from the detritus channel ($D$), litter ($L$) and SOM ($S$).
+
+By definition, 
+
+$$
+f_{RhD} = \frac{Rh}{D} \\
+f_{SL} = \frac{S}{L} \\
+D = S + L
+$$
+Thus, 
+
+$$
+f_{Rh/S} = f_{Rh/D} + \frac{f_{Rh/D}}{f_{S/L}} \\
+f_{Rh/L} = f_{Rh/D} + f_{Rh/D} \times f_{S/L}
+$$
+### Determination of RhDr
+
+The relative consumption factor of rhizodeposits compared to resources from the detritus channel $f_{RhD}$, was determined under two hypothesis :
+
+- fluxes to AMF are 99,999999% rhizofluxes
+
+- the partition of the 13C label across microbial group is a good proxy for the partition of the rhizoflux across microbial groups
+
+#### The partition of 13C label across microbial groups
+
+We calculated enrichment for each microbial group as the mean of the APE of each group's PLFAs, weighted by their concentrations, considering the number of carbon content of each PLFA ($n_{C_{PLFA_i}}$). 
+
+$$
+APE_{group} \times Concentration_{group} = \sum_{PLFA_{group}} APE_{PLFA_i} \times Concentration_{PLFA_i} \times n_{C_{PLFA_i}}
+$$
+
+where $Concentration_{group} = \sum_{PLFA_{group}} Concentration_{PLFA_i}$.
+
+So, 
+
+$$
+APE_{group} = \frac{\sum_{PLFA_{group}} APE_{PLFA_i} \times Concentration_{PLFA_i} \times n_{C_{PLFA_i}}}{\sum_{PLFA_{group}} Concentration_{PLFA_i} \times n_{C_{PLFA_i}}} 
+$$
+
+
+```{r data.APE.µGroups}
+
+data.APE.µGroups <- 
+  read.csv("data_tidy/DataIsoPLFA.csv") %>%
+  separate(col = Component, sep = ":", into = c("Carb", "Insat"),remove = FALSE) %>% 
+  mutate(Nb_Carb = as.numeric(str_extract(Carb, "\\d+")),
+         Numero = as.character(Numero)) %>% 
+  select(1:5, Group, APE13Cppm, Nb_Carb) %>% 
+  drop_na(Group) %>% 
+  mutate(APE13Cppm = if_else( APE13Cppm < 0, NA, APE13Cppm)) %>% 
+  filter(mod %in% c("P", "P+L") & Group != "unsp_microb") %>% 
+  filter(Component != "cy19:0") %>%  #only one value
+  group_by(Component) %>%  # Group by the Component variable
+  #summarise(APE13Cppm = mean(APE13Cppm, na.rm = T))
+  mutate(APE13Cppm = if_else(is.na(APE13Cppm), mean(APE13Cppm, na.rm = TRUE), APE13Cppm)) %>% 
+  ungroup() %>% 
+  left_join(
+    read_csv2("data_imports/DataPLFA.csv")%>% 
+      rename(`18:1w9` =  `18:1w9, 18:3w3, 18:2w6t`,
+             `18:1w7` = `18:1w7, 18:1w9t`
+      ) %>% 
+      select(-gf) %>% 
+      pivot_longer(cols = 4:last_col(), names_to = "Component", values_to = "Concentration") %>% 
+      mutate(Numero = as.character(Numero))
+  ) %>% 
+  mutate(APE13CppmXconcXnC = APE13Cppm * Concentration * Nb_Carb) %>% #mol de 13C-PLFA = %13C/C * mol-PLFA * molC/molPLFA 
+  group_by(Numero, Sp, mod, Group)  %>% 
+  mutate(APE13Cppm_m = 
+           sum(APE13CppmXconcXnC) /
+           sum(Concentration* Nb_Carb)
+  ) %>% 
+  ungroup()# %>% 
+# group_by(Group, mod) %>% 
+# summarise(APE13Cppm_m = mean(APE13Cppm_m))
+
+```
+
+```{r data.prop.label.µGroups}
+data.prop.label.µGroups <- 
+  full.M.MN.kJ.d %>%
+  filter(Group %in% c("B.Gpos", "B.Gneg", "F.s", "F.amf") & mod %in% c("Pl", "Pl+L")) %>%
+  select(Group, Numero, mod, Bloc, Biomass) %>% 
+  rename(Node = Group) %>% 
+  mutate(Group = case_when(
+    Node == "B.Gpos" ~ "firmicutes",
+    Node == "B.Gneg" ~ "Gneg",
+    Node == "F.s" ~ "Zygomycota",
+    Node == "F.amf" ~ "AMF"),
+    .after = Node) %>% 
+  left_join(data.APE.µGroups %>% 
+              select(Numero, Group, APE13Cppm_m) %>% 
+              unique())%>% 
+  mutate(APE13Cppm_m = if_else(is.na(APE13Cppm_m), mean(APE13Cppm_m,  na.rm=T), APE13Cppm_m)) %>% 
+  left_join(read_csv2("SFW_database/ConversionFactorBiomasse.csv")) %>% 
+  mutate(GroupC = ConvFact * Biomass) %>%  #because ConvFact = C_content [µgC/gBiom]
+  mutate(N_C_lab_group = GroupC*APE13Cppm_m) %>% #if we wanted absolute values we should multiply that by 10^6 to have the ppm correctly but we are just interested in prop
+  select(Node, Numero, Bloc, mod, N_C_lab_group) %>%
+  group_by(Numero, Bloc) %>% 
+  mutate(
+    PropLabGroup = N_C_lab_group/sum(N_C_lab_group)) %>%
+  ungroup() 
+```
+
+```{r plot-prop-label-µgroups}
+
+paletteGroups <-
+  c("#76d2e3", "#ddf4f8","#098372", "#4f098d", "#ccdaf4", "#769be3",
+    "#a01307", "#4a838e","#5974aa", "#DAF7A6" ,"grey", "#cd2416","#a4b97d",
+    "#09a306","#8B4513","#8B4513", "#f3da0d", "#8B4513", "#DEB887") %>%
+  setNames(levels(as.factor(full.M.MN.kJ.d$Group)))
+
+data.prop.label.µGroups %>% 
+  mutate(
+    #Node = as.ordered(Node)#,
+    Node = factor(Node, levels = c("B.Gpos", "B.Gneg", "F.s", "F.amf"))
+  ) %>% 
+  ggplot(aes(x = Node, y = PropLabGroup*100))+
+  geom_hline(yintercept = 50, color = "grey")+
+  geom_boxplot(aes(fill = Node))+
+  geom_point()+
+  #facet_grid(.~mod)+
+  labs(y = "% of 13C recovered in microbial groups", x ="Group")+
+  theme(#legend.position = "none",
+    axis.text.x = element_text(angle = 90))+
+  scale_fill_manual(values = paletteGroups)+
+  theme_light()+
+  theme(legend.position = "none")
+```
+
+#### Estimation of RhDr for each group
+
+```{r F_out.µ}
+F_out.µ <- 
+  full.M.MN.ap %>% 
+  filter(Group %in% c("B.Gpos", "B.Gneg", "F.s", "F.amf")) %>% 
+  select(-Biomass, - ea) %>% 
+  left_join(
+    complete_fluxes.ap %>% 
+      filter(From %in% c("B.Gpos", "B.Gneg", "F.s", "F.amf")) %>% 
+      group_by(Numero, Bloc, mod, From) %>% 
+      summarise(Flux = sum(Flux)) %>% 
+      rename(Group = From) %>% 
+      select(-mod)
+  ) %>% 
+  mutate(F_out.µ = MetabolicNeed + Flux) %>% 
+  select(-MetabolicNeed, - Flux)
+```
+
+```{r calc-RhD}
+data.calc.RhD <- 
+  F_out.µ %>% 
+  left_join(
+    data.prop.label.µGroups %>%
+      select(-PropLabGroup) %>% 
+      pivot_wider(names_from = Node, values_from = N_C_lab_group) %>% 
+      mutate(across(where(is.numeric),
+                    ~ .x / F.amf)) %>% 
+      pivot_longer(cols = 4:7, names_to = "Group", values_to = "r.µAMF")
+  ) %>% 
+  dplyr::group_by(NumeroBloc) %>% 
+  dplyr::mutate(
+    Rh_in.AMF = (1 - 1e-9)*F_out.µ[Group == "F.amf"],
+    Rh_in = 
+      if_else(Group == "F.amf", 
+              Rh_in.AMF,
+              r.µAMF * Rh_in.AMF),
+    PropRh = Rh_in/F_out.µ, 
+    Check = any(PropRh > 1, na.rm = TRUE),
+    RhDr = if_else(Check, NA, PropRh/(1 - PropRh)),
+    RhDr = if_else(Group != "F.amf" & RhDr > 100, NA, RhDr) #it's for the few values of PropRh that are almost equal to one, but have not been removed
+  ) %>%
+  ungroup()
+
+
+data.calc.RhD %>% 
+  filter(Group == "F.s") %>% 
+  select(1:5, RhDr, PropRh) %>% 
+  filter(RhDr > 10)
+
+data.calc.RhD %>% 
+  filter(Group == "F.s") %>% 
+  mutate(point_col = if_else(RhDr > 10, "red", "black")) %>% 
+  pivot_longer(cols = c(F_out.µ, r.µAMF, Rh_in, Rh_in.AMF, PropRh), names_to = "var") %>% 
+  drop_na() %>% 
+  ggplot(aes(x = mod, y = value))+
+  facet_wrap(~var, scales = "free")+
+  geom_boxplot()+
+  geom_point(aes(color = point_col))+
+  scale_color_manual(values = c("black" = "black", "red" = "red"))
+```
+
+####Estimation of f.LS for each pot
+
+```{r data-ape-micro, include = F}
+data.APE.micro <-   read_csv2("data_tidy/DataSol.csv") %>% 
+  filter(! mod %in% c("P", "T")) %>% 
+  select(1:5, N_F, N_NF) %>% 
+  pivot_longer(cols= c(N_F, N_NF), names_to = "Type", values_to = "concentration") %>% 
+  separate_wider_delim(cols = Type, delim = "_", names = c("Element", "Type")) %>% 
+  left_join(
+    read_csv("data_tidy/DataAPESoilExtracts.csv") %>% 
+      select(1:5, APE15Nppm) 
+  ) %>% 
+  pivot_wider(names_from = Type, values_from = c(concentration, APE15Nppm)) %>% 
+  #unnest()
+  mutate(across(where(is.list), ~ sapply(.x, function(x) mean(unlist(x), na.rm = TRUE)))) %>% 
+  mutate(concentration_µ = concentration_F - concentration_NF,
+         APE15Nppm_µ = 
+           (APE15Nppm_F * 10^{-6} * concentration_F - 
+              APE15Nppm_NF * 10^{-6} * concentration_NF) / concentration_µ * 10^6
+  ) %>% 
+  select(1:5,APE15Nppm_µ)
+
+data.ape.lit <- 
+  read_csv("data_tidy/DataAPELit.csv") %>% 
+  mutate(CN= CperMS/NperMS) %>% 
+  select(Sp, Type, CperMS, NperMS, APE15Npermil) %>% 
+  mutate(APE15NpermilG = APE15Npermil/1000*15/ (APE15Npermil/1000*15 + (1- APE15Npermil/1000)*14) * 1000) %>%  # conversion from APE permil (mol) to APE permil (mass)
+  select(-APE15Npermil) %>% 
+  pivot_wider(names_from = Type, values_from = c(CperMS, NperMS, APE15NpermilG)) %>% 
+  #pour bien faire est-ce qu'il ne faudrait pas aussi pondérer l'APE par la quanté de NperMS?
+  mutate(APE15Npermil= APE15NpermilG_PS*(0.75/(0.75+1.47)) + # gN/gMS * ‰gN * g 
+           APE15NpermilG_PA*(1.47/(0.75+1.47)),
+         CperMS = CperMS_PS *(0.75/(0.75+1.47)) + 
+           CperMS_PA*(1.47/(0.75+1.47)),
+         NperMS = NperMS_PS *(0.75/(0.75+1.47)) + 
+           NperMS_PA*(1.47/(0.75+1.47))
+  ) %>% 
+  select(-ends_with(c("_PA","_PS")))
+
+```
+
+**Hypothesis**
+
+Relative microbial preference for SOM and litter was assessed from ^15^N enrichment of microbial biomass, considered to reflect microbial consumption of both sources, under the following hypotheses: 
+
+- Nitrogen decomposed from both litter and SOM sources is completely absorbed by microbes
+- CUE is identical for both sources
+
+With:
+
+- $L$ the proportion of flux coming from litter,
+- $S$ the proportion of flux coming from SOM,
+- $N_{lit_{µ}}$, the proportion of nitrogen in the microbial biomass coming from litter,
+- $N_{SOM_{µ}}$, the proportion of nitrogen in the microbial biomass coming from SOM,
+- $N_{lit}$, the proportion of nitrogen in the litter,
+- $C_{lit}$, the proportion of carbon in the litter,
+- $N_{SOM}$, the proportion of nitrogen in SOM,
+- $C_{SOM}$, the proportion of carbon in SOM,
+
+Then, we have:
+
+$$
+f_{L:S} = \frac{C_{conso_{lit}}}{C_{conso_{SOM}}} 
+        = \frac{N_{conso_{lit}} \times \text{C:N}_{lit}}{N_{conso_{SOM}} \times \text{C:N}_{SOM}}
+        = \frac{N_{µ_{lit}}/NUE_{lit} \times \text{C:N}_{lit} }
+               {N_{µ_{SOM}}/NUE_{SOM} \times \text{C:N}_{SOM}} \\
+               
+                
+N_{µ_{lit}} = \frac{\text{APE}_{N_µ}}{\text{APE}_{N_{litter}}} \\
+N_{µ_{SOM}} = 1 - N_{µ_{lit}}
+
+$$
+
+```{r calc-LS}
+NUE_lit = 0.9
+NUE_som = 0.6 
+
+data.calc.LS <- 
+  read_csv2("data_tidy/DataSol.csv") %>% 
+  #colnames()
+  select(1:7, 13:16) %>% 
+  filter(! mod %in% c("P", "T")) %>%  
+  left_join(data.ape.lit %>% 
+              mutate(CNr_lit = CperMS/NperMS) %>%
+              rename(APE15Npermil_lit = APE15Npermil) %>%  
+              select(Sp, APE15Npermil_lit, CNr_lit)) %>%  
+  left_join(data.APE.micro %>% 
+              left_join(data.APE.micro %>% 
+                          group_by(Numero) %>% 
+                          summarise(APE15Nppm_µ_moy = mean(APE15Nppm_µ, na.rm =T))
+              ) %>% 
+              mutate(APE15Nppm_µ = if_else(is.nan(APE15Nppm_µ),
+                                           APE15Nppm_µ_moy,
+                                           APE15Nppm_µ)
+              ) %>% 
+              select(-APE15Nppm_µ_moy)
+  ) %>% 
+  left_join(read_csv("data_tidy/DataIsoSol.csv") %>% 
+              mutate(CNr_soil = CperMS/NperMS) %>% 
+              select(Numero, Bloc, CNr_soil)) %>% 
+  mutate(CNr_µ = C_micro/N_micro,
+         N.µ.lit = APE15Nppm_µ * 10^{-6} / (APE15Npermil_lit*10^{-3}),
+         N.µ.som = 1 - N.µ.lit,
+         N.conso.lit = N.µ.lit / NUE_lit,
+         N.conso.som = N.µ.som / NUE_som,
+         LSr = N.conso.lit* CNr_lit /
+                (N.conso.som * CNr_soil),
+         SLr = 1/LSr,
+         NumeroBloc = str_c(Numero, ".", Bloc)) %>% 
+  select(NumeroBloc, mod, LSr, SLr) 
+
+data.calc.LS %>% 
+  group_by(mod) %>% 
+  summarise(LS.mean = mean(LSr))
+
+
+```
+
+#### Final ratio table
+
+
+```{r data-calc}
+data.calc <-
+  full.M.MN.kJ.d %>% 
+  select(1:7) %>% 
+  filter(Group %in% c("B.Gpos", "B.Gneg", "F.s", "F.amf")) %>% 
+  left_join(data.calc.LS %>% select(-mod)) %>% 
+  left_join(data.calc.RhD %>% 
+              select(Numero, Bloc, Group, RhDr) 
+            ) %>% 
+  mutate(
+    RhSr = case_when(
+            mod == "Pl" ~  RhDr,
+            mod == "Pl+L" ~ RhDr+RhDr/SLr, 
+            .default = NA),
+    RhLr = if_else(mod == "Pl+L",
+                  true = RhDr*SLr+RhDr,
+                  false = NA)
+  ) %>% 
+  arrange(as.numeric(Numero), Bloc) %>% 
+  select(-Numero, - Bloc) %>% 
+  select(-RhDr) 
+
+#gestion des NAs  
+
+data.calc.comp <- 
+  data.calc %>%
+    pivot_longer(cols = 6:last_col(), names_to = "ratio") %>% 
+    left_join(
+      data.calc %>% 
+        pivot_longer(cols = 6:last_col(), names_to = "ratio") %>% 
+        dplyr::group_by(Group, mod, gf, ratio) %>% 
+        dplyr::summarise(
+          Median = median(value, na.rm = T)) %>% 
+        drop_na()
+        ) %>% 
+    mutate(
+      value = 
+        case_when(
+          is.na(value) & str_detect(mod, pattern = "L") & str_detect(ratio, pattern = "L") |
+           is.na(value) & str_detect(mod, pattern = "Pl") & str_detect(ratio, pattern = "Rh") ~ 
+            Median, 
+          .default = value
+        )
+    )  %>% 
+  select(-Median) %>% 
+  drop_na() %>% 
+  pivot_wider(names_from = ratio, values_from = value)
+  
+save(data.calc.comp, data.calc, file = "object/data.calc.Rdata")
+```
+
+
+
+# Final Fluxing --------------------------------------------
+
+```{r outputfluxing, warning=F}
+mat.pred.as.line <- read_excel("SFW_data_tidy/Matrix.xlsx", sheet = "FINAL")
+
+#full.M.MN <- full.M.MN.kJ.d
+
+mat.fluxes <- mat.fluxes_calculation(full.M.MN.kJ.d, mat.pred.as.line)
+
+functions <- 
+  functions_calculation(mat.fluxes) %>% 
+    separate_wider_delim(col = names, 
+                         names = c("Numero", "Bloc"), 
+                         delim = ".") %>% 
+    left_join(read.csv2("SFW_database/NumeroSpModGF.csv") %>% 
+                mutate(Numero = as.character(Numero))) %>% 
+    select(is.character, is.double)
+
+complete_fluxes <- complete_fluxes_calculation(mat.fluxes)
+
+save(full.M.MN.kJ.d, mat.fluxes, functions, complete_fluxes, mat.pred.as.line, file = "object/full.results.Rdata")
+```
+
+```{r}
+full.M.MN.ap
+
+
+functions %>% 
+  filter(predation == 0 |
+           is.na(predation))
+
+functions %>% 
+  filter(predation > 0 & !is_extreme(predation)) %>% 
+  summarise(min(predation),
+            max(predation),
+            median(predation))
+
+functions %>% 
+  filter(herbivory == 0 & mod %in% c("P", "P+L"))
+
+ functions%>% 
+  filter(mod %in% c("P", "P+L") & herbivory > 0 & !is_extreme(herbivory)) %>% 
+  summarise(min(herbivory),
+            max(herbivory),
+            median(herbivory))
+```
+

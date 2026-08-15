@@ -1,0 +1,730 @@
+---
+title: "Soil Food Web Final"
+output: html_document
+date: "2024-09-09"
+---
+
+```{r packages}
+
+#remotes::install_version("deeptime", version = "2.0", repos = "http://cran.rstudio.com")
+#new update does not allow for theme(strip.text = element_text(color = "black)) to override the "auto" lab_colors that put black and white
+ 
+
+library(readxl)
+library(cowplot)
+library(ggpubr)
+library(plotrix)
+
+library(tidyverse)
+library(kableExtra)
+```
+
+```{r source}
+source("FUN_vis_fluxes.R")
+source("FUNS_models_TIDY1.R")
+```
+
+
+```{r load, warning=FALSE}
+load("object/full.results.Rdata")
+load("object/Models.Rdata")
+load("object/data.fb.Rdata")
+
+data.fb.basal <- 
+  data.fb.basal %>% 
+  mutate(flux_type = 
+           case_when(
+              flux_type == "SOM decomp." ~ "SOM cons.",
+              flux_type == "Litter decomp." ~ "Litter cons.",
+              flux_type == "Rhizoflux" ~ "Rhizodep. cons.",
+           )
+  )
+```
+
+
+# Outliers in boxplots
+
+```{r}
+draw_FIG2(functions)
+```
+
+
+
+```{r functions.OL_rm}
+
+functions.OL_rm <-
+  functions %>% 
+  dplyr::mutate(across(where(is.numeric),
+                ~ if_else(is_extreme(.x), 
+                          NA, .x))
+  ) %>% 
+  mutate(
+    predation = if_else(predation == 0, NA, predation),
+    predation = if_else(is.na(predation), min(predation, na.rm = T)/2, predation),
+    predation = if_else(is.nan(predation), NA, predation),
+    herbivory = if_else(herbivory == 0, NA, herbivory),
+    herbivory = if_else(herbivory == 0 & mod %in% c("Pl", "Pl+L"), min(herbivory, na.rm = T)/2, herbivory),
+    herbivory = if_else(mod %in% c("L", "C"), 0, herbivory))
+
+
+functions.OL_rm %>% 
+  dplyr::mutate(across(where(is.numeric),
+                ~ if_else(is_extreme(.x), 
+                          NA, .x))
+  ) %>%
+  dplyr::summarise(across(everything(),  ~sum(is.na(.))))
+
+functions.OL_rm %>% 
+  dplyr::summarise(across(everything(),  ~sum(is.na(.)/n()*100)))
+
+draw_FIG2(functions)
+draw_FIG2(functions.OL_rm)
+
+```
+
+
+```{r overview.full.M.MN}
+
+full.M.MN.kJ.d %>%
+  filter(Group %in% c("B.Gpos", "B.Gneg", "F.s", "F.amf")) %>% 
+  group_by(mod, Group) %>% 
+  dplyr::summarise(Biomass = mean(Biomass)) %>% 
+  pivot_wider(names_from = Group, values_from = Biomass)
+
+full.M.MN.kJ.d %>%
+  filter(Group %in% c("S", "P.rL", "P.lL")) %>% 
+  group_by(mod, Group) %>% 
+  dplyr::summarise(Biomass = mean(Biomass)) %>% 
+  pivot_wider(names_from = Group, values_from = Biomass)
+
+full.M.MN.kJ.d %>%
+  filter(Group %in% c("S", "P.rL", "P.lL","P.dL")) %>% 
+  group_by(Group) %>% 
+  dplyr::summarise(Biomass = mean(Biomass)) %>% 
+  pivot_wider(names_from = Group, values_from = Biomass)
+
+full.M.MN.kJ.d %>%
+  filter(Group %in% c("B.Gpos", "B.Gneg", "F.s","P.dL")) %>% 
+  group_by(Group) %>% 
+  dplyr::summarise(Biomass = mean(Biomass)) %>% 
+  pivot_wider(names_from = Group, values_from = Biomass)
+```
+
+
+# Figure 1
+
+```{r fig1-demo, fig.width = 5, fig.height= 5}
+structure_biomasse <- 
+  full.M.MN.kJ.d %>% 
+  filter(NumeroBloc=="17.A") %>% 
+  dplyr::mutate(mod = "Overview",
+         Biomass = 1)  
+
+structure_fluxes <- 
+  complete_fluxes %>% 
+  filter(Numero =="17", Bloc == "A") %>% 
+  dplyr::mutate(mod = "Overview",
+         flux = 1)
+
+draw_FIG1_legend(
+  mat.pred.as.line,
+  full.M.MN.kJ.d,
+  complete_fluxes
+)
+
+``` 
+
+
+
+```{r fig1-LEG, fig.width=8, fig.height=5}
+
+
+LEG <- 
+  ggpubr::get_legend( 
+    draw_FIG1(
+      mat.pred.as.line,
+      full.M.MN.kJ.d,
+      complete_fluxes
+    ) +
+      theme(legend.direction = "vertical",
+            legend.position = "top",
+            legend.box = "horizontal",
+            legend.text = element_text(size = 18),
+            #legend.title = element_text(size = 20),
+            legend.title = element_markdown(size = 20)
+      ) +
+      guides(size = guide_legend(ncol = 2),
+             linewidth = guide_legend(ncol = 2),
+             color = guide_legend(override.aes = list(linewidth = 2))
+      )
+  ) %>% 
+  as_ggplot()
+
+LEG
+```
+
+
+
+
+```{r FIG1-leg, fig.width = 8, fig.height= 10}
+
+plot_grid(
+  draw_FIG1_legend(
+    mat.pred.as.line,
+    full.M.MN.kJ.d,
+    complete_fluxes
+  ),
+  LEG,
+  ncol = 1,
+  align = "v",
+  rel_heights = c(3, 1)
+)
+
+ggsave("Figures/Figure1_leg.svg")
+ggsave("Figures/Figure1_leg.png")
+```
+
+```{r Fig1-comp, fig.width = 12, fig.height= 12}
+draw_FIG1(
+  mat.pred.as.line,
+  full.M.MN.kJ.d,
+  complete_fluxes
+)
+
+ggsave("Figures/Figure1.svg")
+ggsave("Figures/Figure1.png")
+```
+
+
+# Figure 2 {.tabset}
+
+## Fig 2 - Final
+
+```{r fig.width = 14, fig.height= 12}
+
+plot_grid(draw_FIG2(functions.OL_rm %>% 
+                      filter(Numero != 1 & Numero !=7)),
+          vis_coefs(
+            table.models.log.sc %>% 
+              dplyr::mutate(Parameter = str_replace(string = Parameter,
+                                             pattern = "1",
+                                             replacement = ""),
+                     Parameter = if_else(Parameter =="P", "Pl", Parameter)
+              ), 
+            models.log.sc),
+          rel_widths = c(0.6, 0.4),
+          labels = "AUTO",
+          align = "hv",
+          axis = "b", 
+          label_size = 24
+)
+
+ggsave("Figures/Figure2.png")
+
+#draw_FIG2(functions)
+#draw_FIG2(functions.OL_rm)
+
+table.models.log.sc %>% 
+  rowwise() %>% 
+  dplyr::mutate(dif = if_else(
+    cond = Estimate*CI.inf > 0, 
+    true = max(abs(Estimate), abs(CI.inf)) - 
+      min(abs(Estimate), abs(CI.inf)),
+    false = Estimate - CI.inf
+  ),
+  text = 
+    paste0(
+      round(Estimate, 2), 
+      " ± ",
+      round(dif, 2)
+    )
+  ) %>% 
+  select(RespV, Parameter, text) %>% 
+  pivot_wider(names_from = Parameter, values_from = text) %>% 
+  dplyr::mutate(
+      RespV = case_when(
+        RespV == "som.decomp" ~ "SOM cons.",
+        RespV == "litter.decomp" ~ "Litter cons.",
+        RespV == "rhizoflux" ~ "Rhizodep. cons.",
+        RespV == "predation" ~ "Predation",
+        RespV == "fungivory" ~ "Fungivory",
+        RespV == "bacterivory" ~ "Bacterivory",
+        RespV == "herbivory" ~ "Herbivory",
+        RespV == "total" ~ "Total"
+      ),
+      RespV = factor(RespV, 
+                         levels =c("Total", "Predation", 
+                                   "Fungivory", "Bacterivory",
+                                   "SOM cons.", "Litter cons.",
+                                   "Rhizodep. cons.","Herbivory"))
+  ) %>% 
+  arrange(RespV) #%>% 
+  kable() %>% 
+  kable_classic()
+
+table.models.log.sc
+```
+
+
+# Figure 3 - Fungal vs Bacterial channel
+
+```{r coefs}
+coefs <- 
+  summarise_coefs(models.fig.3) %>% 
+  dplyr::mutate(RespV = case_when(
+    RespV == "SOM decomp." ~ "SOM cons.",
+    RespV == "Litter decomp." ~ "Litter cons.",
+    RespV == "Rhizoflux" ~ "Rhizodep. cons.", 
+    RespV == "FBory" ~ "FBory"
+  )) %>% 
+  #separate_wider_delim(formula, delim = "~", names = c("var", "formula")) %>% 
+  dplyr::mutate(color = if_else(CI.inf * CI.sup > 0, "black", "grey")) 
+
+```
+
+
+```{r fig.3.ory}
+FryBry.graph <- 
+  data.fb.vory %>% 
+  ggplot(aes(x = mod, y = f_b_ratio))+
+  facet_grid_color(~ "Microbivory", colors = c("Microbivory" = "#1297de"))+
+  geom_hline(yintercept = 1, linetype = "dotted")+
+  geom_boxplot(aes(fill = mod))+
+  geom_point(
+    data =
+      data.fb.vory %>%
+      group_by(mod) %>%
+      dplyr::summarise(mean = mean(f_b_ratio, na.rm = T),
+                sd = sd(f_b_ratio, na.rm=T)),
+    aes(x = mod, y = mean, color = mod),
+    size=4
+  )+
+  geom_linerange(
+    data = 
+      data.fb.vory %>% 
+      group_by(mod) %>%
+      dplyr::summarise(
+        mean = mean(f_b_ratio, na.rm = TRUE), 
+        sem = std.error(f_b_ratio, na.rm = TRUE)
+      )
+    ,
+    aes(x = mod, y = mean, ymin = if_else(mean-sem*1.96< 0, 0, mean-sem*1.96), ymax = mean+sem*1.96, color = mod),
+    linewidth = 2)+
+  scale_fill_manual(values = alpha(paletteMod, 0.3))+
+  scale_color_manual(values = c(paletteMod,"yes" = "grey60", "no" = "black"))+
+  geom_richtext(data = 
+                  coefs %>% 
+                  filter(RespV == "FBory")  %>% 
+                  dplyr::mutate(Contains0 = if_else(CI.inf * CI.sup < 0,
+                                             "yes", "no") 
+                  ) %>%
+                  group_by(RespV) %>% 
+                  dplyr::mutate(y = if (n() == 1) 3 else seq(3, 2.75, length.out = n())
+                  ) %>% 
+                  ungroup(),
+                x = 0.5, 
+                
+                aes(
+                  label = paste0(
+                    #"<b>", formula, "</b> <br>",  
+                    "*&beta;", " <sub>", Parameter, "</sub>*", " = ", 
+                    round(Estimate, 2), " ± ", 
+                    round(
+                      if_else(Estimate > 0,
+                              CI.sup - Estimate,
+                              abs(CI.inf) - abs(Estimate)), 2)),
+                  y = y,
+                  color = Contains0
+                ),
+                size = 5,
+                label.colour = NA,
+                label.padding = grid::unit(rep(0, 4), "pt"),
+                hjust = 0
+  )+
+  geom_richtext(data = 
+                  sumR2m(models.fig.3 
+                  ) %>% 
+                  filter(RespV == "FBory"),
+                x = 3.5, 
+                y = 3,
+                aes(label = paste0("*R<sup>2</sup>m* = ", round(R2m, 2), " % <br>",
+                                   "*R<sup>2</sup>c* = ", round(R2c, 2), "%"
+                )),
+                #parse = TRUE,
+                size = 5,
+                label.colour = NA,
+                label.padding = grid::unit(rep(0, 4), "pt"),
+                hjust = 0
+  )+
+  labs(y = "f:b-microbivory",
+       x = "")+
+  theme_light()+
+  theme(legend.position = "none",
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        strip.text = element_text(color = "black",
+                                  #angle = -90,
+                                  size = 20))+
+  ylim(c(0,NA))
+
+
+
+```
+
+
+```{r fig.3.decomp}
+
+fb.graph <- 
+  data.fb.basal %>% 
+  dplyr::filter(flux_type %in% c("SOM cons.", "Litter cons.")) %>% 
+  drop_na(fb_ratio) %>% 
+  dplyr::rename(RespV = flux_type) %>% 
+  ggplot(aes(x = mod, y = fb_ratio))+
+  facet_grid_color(. ~ RespV, color = alpha(paletteFUN, 0.6), scales = "free_x", space = "free_x") +
+  
+  geom_hline(yintercept = 1, linetype = "dotted")+
+  geom_boxplot(aes(fill = mod))+
+  geom_point(
+    data =
+      data.fb.basal %>% 
+      dplyr::filter(flux_type %in% c("SOM cons.", "Litter cons.")) %>%
+      drop_na(fb_ratio)   %>%
+      dplyr::rename(RespV = flux_type) %>% 
+      group_by(mod, RespV) %>%
+      dplyr::summarise(mean = mean(fb_ratio, na.rm = T),
+                sd = sd(fb_ratio, na.rm=T)),
+    aes(x = mod, y = mean, color = mod),
+    size=4
+  )+
+  geom_linerange(
+    data = 
+      data.fb.basal %>% 
+      dplyr::filter(flux_type %in% c("SOM cons.", "Litter cons.")) %>% 
+      drop_na(fb_ratio)  %>% 
+      dplyr::rename(RespV = flux_type) %>% 
+      group_by(mod, RespV) %>%
+      dplyr::summarise(
+        mean = mean(fb_ratio, na.rm = TRUE), 
+        sem = std.error(fb_ratio, na.rm = TRUE)
+      )
+    ,
+    aes(x = mod, y = mean, ymin = if_else(mean-sem*1.96< 0, 0, mean-sem*1.96), ymax = mean+sem*1.96, color = mod),
+    linewidth = 2)+
+  geom_richtext(data = 
+                  coefs %>% 
+                  filter(!RespV %in% c("FBory", "Rhizodep. cons."))  %>% 
+                  dplyr::mutate(Contains0 = if_else(CI.inf * CI.sup < 0,
+                                                    "yes", "no")
+                  ) %>%
+                  group_by(RespV) %>% 
+                  dplyr::mutate(y = if (n() == 1) 1.7 else seq(1.8, 1.6, length.out = n())
+                  ) %>% 
+                  ungroup(),
+                
+                aes(
+                  x = 0.5, 
+                  y = y,
+                  color = Contains0,
+                  label = paste0(
+                    #"<b>", formula, "</b> <br>",  
+                    "*&beta;", " <sub>", Parameter, "</sub>*", " = ", 
+                    round(Estimate, 2), " ± ", 
+                    round(
+                      if_else(Estimate > 0,
+                              CI.sup - Estimate,
+                              abs(CI.inf) - abs(Estimate)), 2))
+                ),
+                size = 5,
+                label.colour = NA,
+                label.padding = grid::unit(rep(0, 4), "pt"),
+                hjust = 0
+  )+
+  geom_richtext(data = 
+                  sumR2m(models.fig.3) %>% 
+                  filter(! RespV %in% c("FBory", "Rhizodep. cons.")),
+                
+                aes(x = 0.5, 
+                    y = 0.1,
+                    label = paste0("*R<sup>2</sup>m* = ", round(R2m, 2), " % <br>",
+                                   "*R<sup>2</sup>c* = ", round(R2c, 2), "%"
+                    )),
+                #parse = TRUE,
+                size = 5,
+                label.colour = NA,
+                label.padding = grid::unit(rep(0, 4), "pt"),
+                hjust = 0
+  )+
+  scale_fill_manual(values = alpha(paletteMod, 0.3))+
+  scale_color_manual(values = c(paletteMod, "yes" = "grey", "no" = "black"))+
+  theme_light()+
+  theme(legend.position = "none",
+        strip.text = element_text(color = "black",
+                                  #angle = -90,
+                                  size = 20),
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20)
+  )+
+  labs(y = "f:b-decomposition",
+       x = "")+
+  ylim(c(0,1.9)) 
+```
+
+
+
+
+```{r fig.3.rhizo }
+fb.graph.rhizo <- 
+  data.fb.basal %>% 
+  dplyr::filter(! flux_type %in% c("SOM cons.", "Litter cons.")) %>% 
+  drop_na(fb_ratio)  %>% 
+  ggplot(aes(x = mod, y = fb_ratio))+
+  facet_grid_color(. ~ RespV, color = alpha(paletteFUN, 0.6), scales = "free_x", space = "free_x") +
+  geom_boxplot(aes(fill = mod))+
+  geom_point(
+    data =
+      data.fb.basal %>% 
+      dplyr::filter(! flux_type %in% c("SOM cons.", "Litter cons.")) %>%
+      dplyr::rename(RespV = flux_type) %>% 
+      group_by(mod, RespV) %>%
+      dplyr::summarise(mean = mean(fb_ratio, na.rm = T),
+                sd = sd(fb_ratio, na.rm=T)),
+    aes(x = mod, y = mean, color = mod),
+    size=4
+  )+
+  geom_linerange(
+    data = 
+      data.fb.basal %>% 
+      dplyr::filter(! flux_type %in% c("SOM cons.", "Litter cons.")) %>% 
+      dplyr::rename(RespV = flux_type) %>% 
+      group_by(mod, RespV) %>%
+      dplyr::summarise(
+        mean = mean(fb_ratio, na.rm = TRUE), 
+        sem = std.error(fb_ratio, na.rm = TRUE)
+      )
+    ,
+    aes(x = mod, y = mean, ymin = if_else(mean-sem*1.96< 0, 0, mean-sem*1.96), ymax = mean+sem*1.96, color = mod),
+    linewidth = 2)+
+  geom_hline(yintercept = 1, linetype = "dotted")+
+  
+  #geom_jitter(aes(color = mod))+
+  geom_richtext(data = 
+                  coefs %>% 
+                  filter(RespV %in% c("Rhizodep. cons.")) %>%  
+                  dplyr::mutate(Contains0 = if_else(CI.inf * CI.sup < 0,
+                                             "yes", "no")),
+                
+                aes(x = 0.5, 
+                    y = 45,
+                    color = Contains0,
+                    label = paste0(
+                      #"<b>", formula, "</b> <br>",  
+                      "*&beta;", " <sub>", Parameter, "</sub>*", " = ", 
+                      round(Estimate, 2), " ± ", 
+                      round(
+                        if_else(Estimate > 0,
+                                CI.sup - Estimate,
+                                abs(CI.inf) - abs(Estimate)), 2))
+                ),
+                size = 5,
+                label.colour = NA,
+                label.padding = grid::unit(rep(0, 4), "pt"),
+                hjust = 0
+  )+
+  geom_richtext(data = 
+                  sumR2m(models.fig.3) %>% 
+                  filter(RespV %in% c("Rhizodep. cons.")),
+                
+                aes(x = 0.5, 
+                    y = 0.1,
+                    label = paste0("*R<sup>2</sup>m* = ", round(R2m, 2), " % <br>",
+                                   "*R<sup>2</sup>c* = ", round(R2c, 2), "%"
+                    )),
+                #parse = TRUE,
+                size = 5,
+                label.colour = NA,
+                label.padding = grid::unit(rep(0, 4), "pt"),
+                hjust = 0
+  )+
+  scale_fill_manual(values = alpha(paletteMod, 0.3))+
+  scale_color_manual(values = c(paletteMod, "yes" = "grey60", "no" = "black"))+
+  theme_light()+
+  theme(legend.position = "none",
+        strip.text = element_text(color = "black",
+                                  #angle = -90,
+                                  size = 20),
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20)
+  )+
+  labs(y = "f:b-rhizoflux",
+       x = "")+
+  ylim(c(0,NA))
+
+data.fb.basal %>% 
+      dplyr::filter(flux_type == "Rhizoflux") %>%
+      #group_by(mod, RespV) %>%
+      dplyr::summarise(
+        mean = mean(fb_ratio, na.rm = T),
+        se = 1.96*std.error(fb_ratio, na.rm=T)
+        )
+```
+
+
+
+```{r fig3.final, fig.width = 10, fig.height= 8}
+
+plot_grid(
+  plot_grid(fb.graph#+
+            #scale_y_continuous(position = "right")
+            , 
+            FryBry.graph, 
+            ncol = 1, 
+            axis = "l",
+            align = "v",
+            labels = c("A", "B"),
+            label_size = 24
+  ),
+  fb.graph.rhizo,
+  
+  ncol= 2,
+  rel_widths = c(0.8, 0.4),
+  labels = c("", "C"), 
+  label_size = 24
+)
+
+
+ggsave("Figures/Figure3.png")
+```
+
+
+
+# Figure 4 - new
+
+```{r fig4, fig.height=8, fig.width=20}
+
+# plot_grid(
+#   vis_coefs2(sum.avg.lit, dredge.table.lit, my.grid = "LITTER PROPERTIES", my.labels = c("A1", "A2")),
+#   vis_coefs2(sum.avg.strat, dredge.table.strat, my.grid = "PLANT TRAITS", my.labels = c("B1", "B2")),
+#   ncol = 1,
+#   axis =  "tblr",
+#   align = "hv"
+# ) 
+
+plot_grid(vis_coefs3(sum.coefs.lit, 
+                    models.lit, 
+                    my.grid = "LITTER QUALITY"), 
+          vis_coefs3(sum.coefs.strat, 
+                    models.strat,
+                    my.grid = "PLANT STRATEGY"),
+          ncol = 1,
+          labels = "AUTO",
+          axis =  "tblr",
+          align = "hv")
+
+ggsave("Figures/Figure4.png")
+
+```
+
+# Graphical abstract
+
+```{r fig.height=3, fig.width=6}
+table.models.log.sc %>% 
+  dplyr::mutate(
+      RespV = case_when(
+        RespV == "som.decomp" ~ "SOM cons.",
+        RespV == "litter.decomp" ~ "Litter cons.",
+        RespV == "rhizoflux" ~ "Rhizodep. cons.",
+        RespV == "predation" ~ "Predation",
+        RespV == "fungivory" ~ "Fungivory",
+        RespV == "bacterivory" ~ "Bacterivory",
+        RespV == "herbivory" ~ "Herbivory",
+        RespV == "total" ~ "Total"
+      ),
+      RespV = factor(RespV, 
+                     levels =rev(c("Total", 
+                               "SOM cons.", "Litter cons.",
+                               "Rhizodep. cons.","Herbivory",
+                               "Fungivory", "Bacterivory",
+                               "Predation"))
+                     )
+      )%>% 
+        filter(Parameter=="Pl" 
+               #& CI.inf*CI.sup > 0
+               ) %>% 
+  mutate(contains0 = CI.inf*CI.sup > 0) %>% 
+  
+  
+  ggplot(aes(x = Estimate, color = RespV, alpha = contains0))+
+  geom_hline(aes(yintercept =0), linetype = "dashed")+
+  geom_point(aes(x = RespV, y = Estimate), size = 5)+
+  geom_linerange(aes(ymin = CI.inf, ymax = CI.sup, x = RespV), linewidth=3)+
+  scale_color_manual(values = paletteFUN)+
+  scale_alpha_discrete(range = c(0.3, 1))+
+  theme_light()+
+  coord_flip()+
+  labs(x = "", 
+       y = ""
+       #y = "Plant addition effect on energy fluxes"
+       )+
+  theme(legend.position = "none",
+        strip.text = element_text(color = "black",
+                                  #angle = -90,
+                                  size = 20),
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20),
+        panel.background = element_rect(fill='transparent'), #transparent panel bg
+        plot.background = element_rect(fill='transparent', color=NA), #transparent plot bg
+        #panel.grid.major = element_blank(), #remove major gridlines
+        #panel.grid.minor = element_blank(), #remove minor gridlines
+        #legend.background = element_rect(fill='transparent'), #transparent legend bg
+        #legend.box.background = element_rect(fill='transparent') 
+  )
+
+ggsave("Figures/GraphAbst_PlantEffect.png")
+
+```
+
+```{r fig.height=4, fig.width=6}
+table.models.log.sc %>% 
+  dplyr::mutate(
+      RespV = case_when(
+        RespV == "som.decomp" ~ "SOM cons.",
+        RespV == "litter.decomp" ~ "Litter cons.",
+        RespV == "rhizoflux" ~ "Rhizodep. cons.",
+        RespV == "predation" ~ "Predation",
+        RespV == "fungivory" ~ "Fungivory",
+        RespV == "bacterivory" ~ "Bacterivory",
+        RespV == "herbivory" ~ "Herbivory",
+        RespV == "total" ~ "Total"
+      ),
+      RespV = factor(RespV, 
+                     levels =rev(c("Total", 
+                               "SOM cons.", "Litter cons.",
+                               "Rhizodep. cons.","Herbivory",
+                               "Fungivory", "Bacterivory",
+                               "Predation"))
+                     )
+      )%>% 
+        filter(Parameter=="L" 
+               #& CI.inf*CI.sup > 0
+               ) %>% 
+  
+  
+  ggplot(aes(x = Estimate, color = RespV))+
+  geom_hline(aes(yintercept =0), linetype = "dashed")+
+  geom_point(aes(x = RespV, y = Estimate), size = 5)+
+  geom_linerange(aes(ymin = CI.inf, ymax = CI.sup, x = RespV), linewidth=3)+
+  scale_color_manual(values = paletteFUN)+
+  theme_light()+
+  coord_flip()+
+  labs(x = "", y = "Litter addition effect on energy fluxes")+
+  theme(legend.position = "none",
+        strip.text = element_text(color = "black",
+                                  #angle = -90,
+                                  size = 20),
+        axis.text = element_text(size = 16),
+        axis.title = element_text(size = 20)
+  )
+```
+
+
+

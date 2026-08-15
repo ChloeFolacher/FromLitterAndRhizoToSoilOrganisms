@@ -1,0 +1,904 @@
+---
+title: "Untitled"
+output: html_document
+date: "2024-07-01"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r packages}
+#library(ggpubr)
+library(ggpmisc)
+library(zfit)
+
+library(readxl)
+library(knitr)
+library(tidyverse)
+```
+
+For calculations of Metabolic need according to Ehnes et al, biomass must be in mg, and gives metabolic rates in J/h. Then to prepare the argument for the fluxing function, we need to have biomass in g and metabolic need in J/y. 
+
+# Microarthropods
+
+Individual metabolic need $X$ (J/h) is calculated as $X = M \cdot I$ and : 
+
+$$\ln(I) = \ln(i_P) + a_P \ln(M)+ E_p \cdot \frac{1}{kT}$$
+
+where for Insecta  $\ln(i_P) = 21,97205$, $a_P = 0,758895$, $E_p = 0,6574038$ (Ehnes2011) and $k$ is Boltzmann's constant ($8.62 · 10^{-5}$ eV.K^{-1}).
+
+For epedaphic we have detailed species individual mass, with specific values for adults and juveniles (Chauvat, perso).
+
+```{r EPE, include = F, echo = T}
+
+k = 8.62 * 10^{-5} # eV K-1
+
+EPE <- 
+  read_csv("data_tidy/DataMesofaunePerM2.csv") %>% 
+  select(where(function(x) !all(is.na(x)))) %>% 
+  mutate(across(6:last_col(),
+                ~ as.double(.))) %>% 
+  select(-c(starts_with("m_"), starts_with("N_"), NbJuv_Ep, PerJuv_Ep, NbJuv_Hem, PerJuv_Hem)) %>% 
+  pivot_longer(6:last_col(), names_to="Type", values_to = "n") %>% 
+  left_join(read_csv2("SFW_database/IndMassEpi.csv")) %>% #IndMass in µg
+  mutate(Ind.FreshMass = 0.001 * Ind.Mass * 3.33) %>% #conversion in mg and in fresh mass
+  left_join(read_csv2("SFW_database/MeanTemp.csv")) %>% #MeanTemp is in °C
+  mutate(MeanTemp = MeanTemp + 273.15) %>% #conversion in K
+  mutate(lnI = 21.97205 + 0.758895*log(Ind.FreshMass) - 0.6574038/(k*MeanTemp), 
+         I = exp(lnI), #I in J h-1 (from Ehnes2011)
+         nX = exp(lnI) * n # nX is metabolic rate by species type so individual metabolic rate X multiply by Type abundance J h-1
+         ) %>% 
+  select(c(1:5, Type, nX)) %>% 
+  pivot_wider(names_from = Type, values_from = nX) %>% 
+  rowwise() %>% 
+  mutate(MetabolicNeed.Epe = sum(c_across(6:last_col()), na.rm = T)) %>% # J h-1
+  ungroup() %>% 
+  #we then add again fresh biomass
+  select(c(1:5, MetabolicNeed.Epe)) %>% 
+  add_column(Mass.Epe = # mg
+               read_csv("data_tidy/DataMesofaunePerM2.csv") %>% 
+               select(where(function(x) !all(is.na(x)))) %>%
+               select(-c(starts_with("m_"), starts_with("N_"), NbJuv_Ep, PerJuv_Ep, NbJuv_Hem, PerJuv_Hem)) %>% 
+               pivot_longer(6:last_col(), names_to="Type", values_to = "n") %>% 
+               mutate(n= if_else(is.na(n), 0, n)) %>% 
+               left_join(read_csv2("SFW_database/IndMassEpi.csv")) %>% #IndMass in µg
+               mutate(FreshMass = 0.001*Ind.Mass * #conversion in mg
+                        n * # multiplication by abundance
+                        3.33 #conversion to FreshMass
+                      ) %>%  
+               select(-Ind.Mass, - n) %>% 
+               pivot_wider(names_from = Type, values_from = FreshMass)  %>%  
+               rowwise() %>% 
+               mutate(FreshMass = sum(c_across(6:last_col()))) %>% 
+               #select(c(1:5, Mass)) %>% 
+               pull(FreshMass))
+
+```
+
+For other micro-arthropods, we use the amount of individual C assessed during 
+
+```{r microarthropods-table, include = F}
+
+microarthr <- 
+  read_csv2("data_imports/Bilan_isotopie_meso.csv") %>%
+  select(Numero, Bloc, Group, C_amount, N, Weight) %>% 
+  left_join(read_csv("data_imports/mesoNcapsA.csv") %>% 
+              pivot_longer(cols = starts_with("N_"), 
+                           names_to = c("bin", "Group"), 
+                           names_sep = "_", 
+                           values_to = "N.caps") %>% 
+              select(-bin, - Sp), 
+            by = c("Numero", "Bloc", "Group")) %>% 
+  mutate(N.caps = if_else(is.na(N.caps),
+                          N,
+                          N.caps), # we join bloc A in N.casp
+         m.ind = if_else(Weight > 0,
+                         Weight/N.caps,
+                         NA)) %>% 
+  select(-N) %>% 
+  mutate(C.ind = C_amount/N.caps) %>% #individual carbon content 
+  mutate(m.ind.C = # individual mass based on carbon content
+           if_else(Group == "gam",  #m.ind.C is in µg/ind
+                         C.ind/0.413, #where 0.413 is mesostigmata's PropC according to Potapov2022 SupMat
+                         C.ind/0.451) #where 0.541 is Collembola's PropC according to Potapov2022 SupMat  
+         ) %>% 
+  right_join(
+    read_csv("data_tidy/DataMesofaunePerM2.csv") %>%
+      select(- ends_with(c("_Hem", ".Ad", ".Juv", "_Ep"), ignore.case = FALSE),
+             - starts_with("m_tot")) %>%
+      pivot_longer(cols = starts_with("N_tot"), 
+                   names_to = c("mes", "bin", "Group"), 
+                   names_sep = "_", 
+                   values_to = "N_tot") %>% 
+      select(-c(mes, bin, gf, Sp, mod)) %>% 
+      mutate(Group = if_else(Group == "ep",
+                             "epi",
+                             Group)), 
+    by = c("Numero", "Bloc", "Group")) %>%
+  mutate(m.tot.C = m.ind.C*N_tot) %>% 
+  arrange(Group, Bloc, Numero) %>% 
+  filter(Group != "epi")
+
+```
+
+
+
+```{r HEMI, echo = T, include = F}
+
+HEM <- 
+  microarthr %>% 
+  filter(Group== "hem") %>%
+  left_join(read_csv2("SFW_database/FWDWRatio.csv")) %>% 
+  select(Numero, Bloc, m.ind, m.ind.C, N_tot, FW.over.DW.Ratio) %>% 
+  mutate(
+    Ind.FreshMass = m.ind.C*0.001* #convertion of µg to mg
+                    FW.over.DW.Ratio,
+    Ind.FreshMass = if_else(is.na(Ind.FreshMass),
+                       mean(Ind.FreshMass, na.rm = TRUE),
+                       Ind.FreshMass
+                       )) %>% 
+  left_join(read_csv2("SFW_database/MeanTemp.csv")) %>% #MeanTemp is in °C
+  mutate(MeanTemp = MeanTemp + 273.15) %>% #conversion in K
+  mutate(lnI = 21.97205 + 0.758895*log(Ind.FreshMass) - 0.6574038/(k*MeanTemp), #I in J h-1 (from Ehnes2011) 
+         I = exp(lnI),
+         MetabolicNeed.Hem = exp(lnI) * N_tot, #J/h
+         Mass.Hem = Ind.FreshMass*N_tot) %>% #mg
+  select(Numero, Bloc, MetabolicNeed.Hem, Mass.Hem) %>%
+  group_by(Bloc, Numero) %>% 
+  summarise(across(where(is.numeric),
+                   mean, na.rm=TRUE)) %>% 
+  ungroup()
+
+``` 
+
+
+For Mesostigmata  $\ln(i_P) = 9.674023$, $a_P = 0.6904864$, $E_p = 0.3792541$ (Ehnes2011).
+
+```{r MESOSTI,echo = T, include = F}
+
+GAM <- 
+  microarthr %>% 
+  filter(Group== "gam") %>%
+  left_join(read_csv2("SFW_database/FWDWRatio.csv")) %>% 
+  select(Numero, Bloc, m.ind, m.ind.C, N_tot, FW.over.DW.Ratio) %>% 
+  mutate(
+    Ind.FreshMass = m.ind.C*0.001* #convertion of µg to mg
+      FW.over.DW.Ratio,
+    Ind.FreshMass = 
+           if_else(
+             is.na(Ind.FreshMass),
+             mean(Ind.FreshMass, na.rm = TRUE),
+             Ind.FreshMass
+           )
+  ) %>% 
+  left_join(read_csv2("SFW_database/MeanTemp.csv")) %>% #MeanTemp is in °C
+  mutate(MeanTemp = MeanTemp + 273.15) %>% #conversion in K
+  mutate(lnI = 9.674023 + 0.6904864*log(Ind.FreshMass) - 0.3792541/(k*MeanTemp), #I in J h-1 (from Ehnes2011)
+         I = exp(lnI),
+         MetabolicNeed.Gam = exp(lnI) * N_tot,#J/h
+         Mass.Gam = Ind.FreshMass*N_tot) %>% #mg
+  select(Numero, Bloc, MetabolicNeed.Gam, Mass.Gam) %>% 
+  group_by(Numero, Bloc) %>% 
+  summarise(across(where(is.numeric),
+                   mean, na.rm=TRUE)) %>% 
+  ungroup()
+```
+
+```{r tidy-microarthr, echo = T, include = F}
+
+Microarthropods <- 
+  EPE %>% 
+  left_join(HEM%>%
+              group_by(Numero, Bloc) %>% 
+              summarise(MetabolicNeed.Hem = mean(MetabolicNeed.Hem),
+                        Mass.Hem = median(Mass.Hem)), 
+            by = c("Numero", "Bloc")
+            ) %>% #because we have a duplicate in Gam that we need to adress 
+  left_join(GAM %>%
+              group_by(Numero, Bloc) %>% 
+              summarise(MetabolicNeed.Gam = mean(MetabolicNeed.Gam),
+                        Mass.Gam = median(Mass.Gam)), 
+            by = c("Numero", "Bloc") 
+             ) %>% #because we have a duplicate in Gam that we need to adress 
+  pivot_longer(cols = 6:last_col(), names_to ="Type", values_to = "mes") %>% 
+  separate_wider_delim(Type, delim =".", names = c("Type","Group")) %>%
+  pivot_wider(names_from = Type, values_from = mes) %>% 
+  mutate(MN.J.y.m2 = MetabolicNeed *24*360, #conversion from J/h/m2 to J/y/m2
+         FreshMass.g.m2 = Mass*0.001) %>%  #conversion from mg to g
+  select(-MetabolicNeed,-Mass) 
+  
+  
+write_csv2(Microarthropods,"SFW_data_tidy/Microarthropods.csv")
+
+Microarthropods %>% 
+  group_by(mod, Group) %>% 
+  summarise(
+    MN.J.y.m2 = mean(MN.J.y.m2),
+    MN.kJ.d.m2 = mean(MN.J.y.m2) * 0.001 / 360,
+    Mass.mg.m2 = mean(FreshMass.g.m2)*1000)
+
+```
+
+# Nematodes 
+
+Because there is no specific values, we use the generic equation, where $\ln(i_P) = 23.055335$, $a_P = 0.695071$, $E_p = 0.68642$ (Ehnes2011). As for epedaphic, we have more precise data than our trophic group, so metabolic needs are calculated as finely as possible, and then, sumed per group.
+
+```{r nematodes_biomass_per_trophic_group , include = F, echo = T}
+
+dico.nem <- read_csv2("SFW_database/NematodesFamily.csv", col_names = c("Family", "TrophicGroup", "FreshBodyMass"), skip =1)
+
+#bien penser à remultiplier par l'abondance totale pour revenir en nem/gsol
+
+Nematodes <- 
+  read_csv2("data_tidy/DataNematodesPerM2.csv") %>% 
+  pivot_longer(cols= 9:last_col(), names_to = "Family", values_to = "CountPerMil") %>% 
+  inner_join(dico.nem) %>%  #adding trophic group and fresh body mass data [µg]
+  left_join(read_csv2("SFW_database/MeanTemp.csv")) %>% #MeanTemp is in °C
+  mutate(
+    FreshBodyMass = FreshBodyMass * 0.001, #conversion from µg to mg
+    MeanTemp = MeanTemp + 273.15, #conversion in K
+    FreshMass.fam =  CountPerMil * NemPerM2 * FreshBodyMass, 
+    lnI = 23.055335 + 0.695071*log(FreshBodyMass) - 0.68642/(k*(MeanTemp)), #I in J h-1 (from Ehnes2011) 
+    X = exp(lnI), # metabolic need per ind for each family
+    MetabolicNeed.fam = CountPerMil * NemPerM2 * X # family metabolic need (metabolic need per ind * N ind) - J h-1
+         ) %>% 
+  #filter(Family == "Tylenchidae")
+
+  
+  group_by(Numero, Bloc, Sp, mod, gf, TrophicGroup) %>%
+  summarise(MetabolicNeed.TG.nem = sum(MetabolicNeed.fam, na.rm = TRUE),
+            MN.TG.nem.J.y.m2 = MetabolicNeed.TG.nem*24*360,  #conversion from J/h/m2 to J/y/m2
+            Mass.TG.nem.g.m2 = sum(FreshMass.fam, na.rm = TRUE)*0.001,
+            #MN.TG.nem.kJ.d.m2 = sum(MetabolicNeed.fam, na.rm = TRUE) *24 * 0.001
+            ) %>% #conversion from mg to g
+  select(-MetabolicNeed.TG.nem) %>%
+  ungroup()# %>% 
+  # group_by(TrophicGroup, mod) %>% 
+  # summarise(
+  #   MN.TG.nem.J.y.m2 = mean(MN.TG.nem.J.y.m2)
+  # )
+
+
+rm(dico.nem)
+
+
+# data.nem.biomass %>% 
+#   filter(TrophicGroup == "Omnivores" & Mass.TG.nem.m2 > 0)
+
+write_csv2(Nematodes, "SFW_data_tidy/Nematodes.csv")
+
+```
+
+# Microbes
+
+We based our choice of PLFA on Joergensen 2021's classification. We tested a few combinations of conversion factors found in the litterature. 
+
+
+## Conversion from PLFA concentration to PLFA Biomass
+
+Conversion factors (µgC/nmol PLFA) already take into account the fact that there are un-identified PLFA. We have:
+
+
+- two value for AMF conversion factor : 366 from Joergensen2008 synthesis but it says it might overestimate by 5-10 times or 26.32 from Olsson1995,
+
+
+- two solutions for bacteria: either considering the generic factor of 2.75 or taking into account that Gram- bacteria contain ~ 50% more PLFA than G+ bacteria (Joergensen2008)
+
+
+- two solution for fungal biomass: only taking into account 18:2w6,9 with the conversion factor of 107 (Joergensen2008) or a re-calculation from KlamerBaath2004 of a factor based on the sum of 18:2w6,9 and 18:1w9 of 60.79 (see Excel File conversion fungal PLFA Klamer&Baath for more detail on this recalculation).
+
+
+We chose scenario 6 because it was the most consistent with our total estimation of microbial biomass according to the fumigation-extraction method. 
+
+```{r include = TRUE, echo= FALSE}
+
+knitr::kable(read_csv2("SFW_database/ConversionFactorC_micro.csv") %>% 
+               filter(Group != "unsp_microb"), 
+  caption = "Overview of Conversion factors combinaisons")
+  
+```
+
+
+There is a significant difference in the dominant fungal group in presence of plants, which might slightly biais our estimation according to modality (underestimating a bit fungal biomass when Zygomycota are more dominant, so in Litter and Control), because conversion factor 6 is based only on 18:2w6,9 and does not take into account 18:1w9.
+
+Microbial C is then converted into microbial biomass according to the table below with C content (µgC/µg): 
+
+```{r ConversionMicrobialBiomass include = TRUE, echo= FALSE}
+knitr::kable(read_csv2("SFW_database/ConversionFactorBiomasse.csv") %>% 
+  filter(Group != "unsp_microb"),
+  caption = "Microbial C content (µgC/µg)")
+```
+
+
+
+```{r dataPLFAC}
+
+data.PLFA.C <-
+  read_csv2("data_imports/DataPLFA.csv") %>% 
+  pivot_longer(c(5:last_col()), 
+               names_to = "Component",
+               values_to = "Concentration") %>% 
+  left_join(read_csv2("SFW_database/PLFAGroups_JoergMW.csv")) %>% 
+  mutate(Component = if_else(Component ==  "18:1w9, 18:3w3, 18:2w6t",
+                             "18:1w9", 
+                             if_else(Component == "18:1w7, 18:1w9t",
+                                     "18:1w7",
+                                     Component)
+         )) %>% 
+  drop_na(Group) %>% # keeping only groups identified as microbes by Joergensen2021
+  filter(Group != "unsp_microb" & Group != "Zygomycota") %>% 
+  group_by(Numero, Sp, gf, Group) %>% 
+  summarise(Concentration = sum(Concentration)) %>% # PLFA concentration nmol/gsoil for each group
+  ungroup() %>% 
+  pivot_wider(values_from = Concentration, names_from = Group) %>%
+  rowwise() %>% 
+  mutate(PLFA_tot = sum(c_across(4:last_col()))) %>% 
+  ungroup() %>% 
+  pivot_longer(c(4:last_col(), -PLFA_tot), names_to = "Group", values_to = "Concentration") %>% 
+  left_join(read_csv2("SFW_database/ConversionFactorC_micro.csv") %>% select(Group, ConvFact6)) %>%
+  rename(ai = ConvFact6) %>% # ai [µgC/nmol PLFA]
+  mutate(C_micro = Concentration*ai) %>% #conversion from nmol/gsoil to µgC/gsoil
+  select(-c(Concentration, ai)) %>% 
+  left_join(read_csv2("SFW_database/ConversionFactorBiomasse.csv")) %>%
+  mutate(Biomass = 1/ConvFact * C_micro) %>%  #because ConvFact = C_content [µg/gsol]
+  select(-c(Type, ConvFact, PLFA_tot))
+
+
+save("data.PLFA.C", file = "object/data.PLFA.C.Rdata")
+```
+
+
+We calculated proportion of biomass for each group in each modality (PLFA being measured on a composite sample of the three replicates of one modality), which we multiplied by the total microbial C extracted in the fumigation-extraction protocol.
+
+
+```{r}
+data.PLFA.C %>% 
+  filter(Numero == 46)
+```
+
+```{r microbial.biomass, echo = T, include=FALSE}
+
+microbial.biomass <- # microbial biomass per gSoil
+  read_csv2("data_tidy/DataSol.csv") %>% 
+  select(Numero, Bloc, Sp, gf, mod, 
+         C_micro) %>% # µgC/gsol
+  rename(C_micro_FE = C_micro) %>% 
+  left_join(data.PLFA.C %>% 
+              select(-Biomass) %>% 
+              pivot_wider(names_from = Group, values_from = C_micro) %>% 
+              rowwise() %>% 
+              mutate(C_tot = sum(c_across(4:last_col()))) %>% 
+              ungroup() %>%
+              pivot_longer(c(4:last_col(), -C_tot), names_to = "Group", values_to = "C_micro") %>% 
+              mutate(PropC = C_micro/C_tot) %>% # the contribution of each microbial group to total biomass 
+              select(Numero, Group, PropC),
+            by = "Numero") %>% 
+  mutate(C_micro_group = C_micro_FE*PropC) %>% 
+  left_join(read_csv2("SFW_database/ConversionFactorBiomasse.csv")) %>%
+  mutate(µgBiomassPerGSoil = 
+           1/ConvFact * C_micro_group  #because ConvFact = C_content [µgC/µg_microb]
+           ) %>%  
+  select(-c(ConvFact))
+
+
+```
+
+
+
+
+## Metabolic needs and absorption efficiencies
+
+For microbes, metabolic rate is equal to respiration, but we need the energetic equivalent of respirated CO~2~, not the respiration rate in ppm CO~2~.
+
+
+#### From CO~2~ Respirated to Energy per m^2^ 
+
+##### Objectives
+
+We want the amount of CO~2~, $n_{{CO_2}_{bottle}}$ in the incubation bottle at the end of the incubation period, so we can convert it to energy (we can't do that directly from concentration), using a conversion factor of 1 g C = 39 kJ based on the enthalpy of glucose combustion (Sandler & Orbey, 1991).
+
+**Law of ideal gas:** $PV = nRT$ or, in the case we are interested in $n = PV/RT$.
+
+
+With the pressure $P$ ($P_{tot}$) in Pa, the volume $V$ in m^3^, the amount of gas substances $n$ in mol (in our case $n_{{CO_2}_{bottle}}$), the temperature $T$ in K, and $R = 8.3145$ the gas constant. The equation is also applicable to gas i at the concentration $x_i$ with $P_i$ the partial pressure and $V_i$ the partial volume, where $x_i = \frac{n_i}{n_{tot}} = \frac{P_i}{P_{tot}} = \frac{V_i}{V_{tot}}$. 
+
+
+However, we haven't measured the total pressure $P_{tot}$ at the end of the incubation period, only $x_{{CO_2}_{bottle}}$ so we are missing a data to calculate $n_{{CO_2}_{bottle}}$. However, as the bottle were filled with without CO~2~ atmosphere before the beginning of incubation, and we know the stoichiometry of respiration reaction, we can calculate it. 
+
+
+**Aerobic heterotrophic respiration:** 6 C~6~H~12~O~6~ + 6 O~2~ $\rightarrow$ 6 CO~2~ + 6 H~2~O.
+
+We can deduce that every mole of consumed O~2~ is replaced by a mole of H~2~O, and every CO~2~ mole augments the total pressure.
+Thus, 
+
+$P_{tot} = P_{atm} + P_{CO_2}$ and $x_{CO_2} = \frac{P_{CO_2}}{P_{atm} + P_{CO_2}}$, so :
+
+$$P_{CO_2} = \frac{x_{CO_2} \cdot P_{atm}}{1 - x_{CO_2}}$$
+
+$$ n_{CO_2} = \frac{P_{CO_2} · V_{tot}}{R \cdot T} = \frac{P_{tot}· V_{tot}}{R \cdot T}  · x_{CO_2}  $$
+
+
+```{r PVnRT}
+Patm = 1.01325e5 #en Pa
+R = 8.3145 # gas constant J. K-1 . mol-1
+Q10 = 2
+
+metabolic.microb <- 
+  read_csv2("data_imports/IncubTime_CO2.csv") %>% 
+  drop_na() %>% 
+  mutate(Numero = as.integer(Numero),
+         Bloc = as.factor(Bloc),
+         xCO2 = XCO2 *10^{-6},#ppm into 0-1 range
+         PCO2 = xCO2*Patm/(1-xCO2),
+         Ptot = Patm + PCO2,
+         nCO2.bottle = # mol
+           Ptot * 0.5e-3 * xCO2 / #Ptot en Pa * V = 0.5 L converted in m3
+           (R * (25+ 273.15) ) #T_incub = 25 °C converted in K
+         ) %>% 
+  select(Numero, Bloc, nCO2.bottle, IncubTime) %>% 
+  
+  mutate(
+    gCbottle = #g
+      nCO2.bottle *12, # mol * g/mol
+    µgCPerGSoilPerH = #µgC-CO2 / g Soil / h
+      gCbottle *10^6 / #µgC-CO2
+      50 / # G Soil
+      (IncubTime /60) # min / min/h
+    
+  ) %>%  #so far OK
+  
+  filter(!is.na(Numero)) %>% 
+  left_join(microbial.biomass %>% #µgC / gsol
+              select(Numero, Bloc, C_micro_FE) %>% 
+              unique() %>% 
+              rename(µgCmicroPergSoil = C_micro_FE) %>% 
+              mutate(Numero = as.integer(Numero),
+                     Bloc = as.factor(Bloc)) %>% 
+              filter(!is.na(Numero)),
+            by = c("Numero", "Bloc")) %>% 
+  left_join(read_csv2("SFW_database/MeanTemp.csv")) %>% #MeanTemp is in °C
+  mutate(MetRate.µgCO2.µgCmicro.H = #µg C-CO2 / µg C-microb / h
+           µgCPerGSoilPerH / # µg C-CO2 / g Soil / h
+           µgCmicroPergSoil, # µg C-microb / g soil
+         #temperature correction
+         qCO2 = MetRate.µgCO2.µgCmicro.H * Q10 ^ ((MeanTemp - 25)/10) #gC-CO2 / gC-microb / h
+         ) 
+
+#save("full.M.MN.kJ.d", file = "object/full.M.MN.kJ.d.Rdata")
+save("metabolic.microb", file = "object/metabolic.microb.Rdata")
+
+```
+
+
+
+
+#### Metabolic quotients - unplant pots corrected
+
+Everything here is presented with $qCO_2$, which is the metabolic rate expressed as ppm CO~2~ per gram of microbial C. What we have is the metabolic rate expressed as kJ per gram of microbial C, but the reasoning still apply (I will rewrite everything later, but as I started the calculations with $q_CO2$ before noticing I needed the conversion to kJ done at the first step, I haven't rewritten it yet, but you just have to replace $q_CO2$ by "metabolic rate / MN"). 
+
+
+The metabolic quotient of soil microbes (qCO_2, g C‐CO_2 g-1 Cmicrobial hour-1) is basal respiration divided by microbial biomass, and was standardized to the plot-specific soil temperature using the following equation (Xu et al., 2017):
+
+$$qCO_{2_{pot}} = qCO_{2_{incub}} * Q_{10}^{\frac{T_{field}-T_{incub}}{10}} $$
+
+where $qCO_{2_{pot}}$ and $qCO_{2_{incub}}$ are the $qCO_2$ for field and incubation conditions, respectively, $T_{field}$ and $T_{incub}$ are the bloc specific soil temperature (mean across growth period) and the incubation temperature (25 °C), respectively. $Q_{10}$ is the temperature sensitivity coefficient, and a $Q_{10}$ value of 2 was used (Xu et al., 2017). 
+
+Assuming that bacteria breath twice as much as fungi (SakamotoOba1994) :
+
+$$qCO_{2_{bact}} =  2 \cdot qC0_{2_{fungi}}$$
+
+
+As we also have
+
+$$qCO_{2_{fungi}} = qCO_2 \cdot  x_{fungi} $$
+
+and the equivalent for bacteria, we can deduce that :
+
+$$qCO_{2_{fungi}} = \frac{qCO_2}{2 \cdot x_{bacteria} + x_{fungi}}$$
+
+where $x_{bacteria}$ and $x_{fungi}$ are respectively the biomass fraction of each group.
+
+Assuming that there is no difference of respiration rate within bacterial and fungal groups, we also have (where $x_{_subgroup}$ = $\frac{subgroup}{group}$) :
+
+
+$$ qCO_{2_{Gneg}} = qCO_{2_{bact}} \cdot x_{Gneg} $$
+$$ qCO_{2_{firmicutes}} = qCO_{2_{bact}} \cdot x_{firmicutes} $$
+$$ qCO_{2_{saproF}} = qCO_{2_{fungi}} \cdot x_{saproF} $$
+$$ qCO_{2_{AMF}} = qCO_{2_{fungi}} \cdot x_{AMF} $$
+However, because AMF are probably in a dormant state or at least activity-diminished state when no plants are present, we will assume their contribution is either null or 10% of its weighted equivalent, so :
+
+$$ qCO_{2_{AMF}} = qCO_{2_{fungi}} \cdot 0.001 \cdot x_{AMF} $$
+
+$$ qCO_{2_{saproF}} = qCO_{2_{fungi}} \cdot \frac{1 - 0.001 \cdot x_{AMF}}{x_{fungi}}  $$
+
+Metabolic need is then calculated as $MN = qCO_{2_{group}} * \text{biomass}_{{group}}$. 
+
+
+
+```{r metabolic.quotients-0.001AMF}  
+
+ConvFactGlu = 39 #kJ/gC
+
+Microbes <- 
+  microbial.biomass %>% 
+  select(1:5, Group, C_micro_group) %>% 
+  drop_na(Numero) %>% 
+  pivot_wider(values_from = C_micro_group, # µgC micro / g soil
+              names_from = Group) %>% 
+  rename(Gpos = firmicutes,
+         SaproF = AscoBasio) %>% 
+  
+
+  mutate(Numero = as.character(Numero)) %>% 
+  left_join(read_csv2("SFW_database/MeanTemp.csv")) %>% #MeanTemp is in °C
+  left_join(metabolic.microb %>% 
+              select(Numero, Bloc, qCO2) %>% 
+              mutate(Numero = as.character(Numero))) %>% 
+  mutate(TotBiomass = sum(AMF, SaproF, Gneg, Gpos),
+         totBact = Gneg+Gpos,
+         totFungi = AMF+SaproF,
+         xBact = totBact/TotBiomass,
+         xFungi = totFungi/TotBiomass,
+         qCO2f = qCO2 / (2*xBact + xFungi) , 
+         qCO2b = 2*qCO2f, 
+         #with the hypothesis that qCO2Gneg = qCO2firmi, qCO2Gneg = qCO2bact * xGneg & idem for fungal groups
+         qCO2.Gneg = qCO2b * Gneg/totBact,  
+         qCO2.Gpos = qCO2b * Gpos/totBact,
+         qCO2.AMF = 
+           if_else(
+             condition = mod %in% c("P", "P+L"), 
+             true = qCO2f * AMF/totFungi,
+             false = qCO2f * 0.001*AMF/totFungi
+         ),
+         qCO2.SaproF = 
+           if_else(
+             condition = mod %in% c("P", "P+L"), 
+             true = qCO2f * SaproF/totFungi,
+             false = qCO2f * (1 - 0.001*AMF/totFungi)
+         ),
+         #Resp|MetabolicNeed group = qCO2 group (# µg C-CO2 / g Soil / h) * biomass group (µg C micro / g soil)
+         MN.Gneg = qCO2.Gneg *Gneg, 
+         MN.Gpos = qCO2.Gpos * Gpos,
+         MN.AMF = qCO2.AMF*AMF,
+         MN.SaproF = qCO2.SaproF * SaproF) %>% 
+  select(- c(starts_with(c("x", "q", "tot")), MeanTemp)) %>% 
+  rename_with(~ if_else(. %in% c("AMF", "SaproF", "Gneg", "Gpos"), 
+                        paste0( "biom.", .), 
+                        .)) %>% 
+  pivot_longer(cols = c(6:last_col()), names_to = "names", 
+               values_to = "values") %>% 
+  separate_wider_delim(cols=names, delim =".", names=c ("Type", "Group")) %>% 
+  pivot_wider(names_from = Type, values_from = values) %>% 
+  
+     
+  ###
+  left_join(read_csv2("SFW_database/FWDWRatio.csv") %>% 
+              select(Group, FW.over.DW.Ratio) %>% 
+              mutate(Group = if_else(Group == "firmicutes", 
+                                     "Gpos", Group))
+            ) %>% 
+  mutate(
+    MetabolicNeed.J.y.gsoil =  
+           MN * 10^{-6} * # µg C-CO2 --> g C-CO2 
+           ConvFactGlu * # conversion from CO2 to kJ with conversion factor = 39 kJ / gC-CO2
+           24 * 365 * # hour --> year
+           1000, # kJ --> J
+         µgBiom.gsoil = biom * FW.over.DW.Ratio) %>% 
+  select(-MN, - biom, - FW.over.DW.Ratio) 
+  
+```
+
+
+```{r microbial.biomass.g.m2}
+
+Microbes.m2 <- 
+  Microbes %>% 
+  mutate(gBiomPerM2 = #g Biomass Per m2
+           µgBiom.gsoil * #in µg/gsol
+           0.8 * #density in g/cm3
+           7 * #7 cm3/cm2 (7 cm depth bilan)
+           10000 * # conversion from cm2 to square meter
+           0.000001,# conversion from µg to g
+         MN.perM2 = #J / y / m2
+           MetabolicNeed.J.y.gsoil*
+           0.8 * #density in g/cm3
+           7 * #7 cm3/cm2 (7 cm depth bilan)
+           10000  # conversion from cm2 to square meter
+  ) %>%  
+  select(-c(MetabolicNeed.J.y.gsoil, µgBiom.gsoil)) 
+
+
+write_csv2(Microbes.m2, "SFW_data_tidy/Microbes_001AMF.csv")
+    
+```
+
+
+```{r}
+rm(Microbes, EPE, GAM, HEM, lm.B.hem, microarthr,
+   metabolic.microb, 
+   data.PLFA.C)
+```
+
+# Absorption efficiencies and basal resources
+
+Absorption efficiencies are based on this formula (Jochum2017): 
+$$\text{logit}(e_a) = 0.471 \cdot \text{FoodN} - 2.097 $$
+that is,
+
+$$e_a = \frac{\exp(0.471 \cdot \text{FoodN} - 2.097)}{1 + \exp(0.471 \cdot \text{FoodN} - 2.097)} $$
+## Microbes and fauna
+
+For microbes and micro/mesofauna we'll use generic N content from the litterature (Potapov2022).
+
+```{r absorptionEffFauna, echo=T, include=F}
+
+read_csv2("SFW_database/GroupsN_content.csv") %>% 
+  mutate(ea = exp(0.471 * N.content - 2.097)/ (1 + exp(0.471 * N.content - 2.097))) %>% 
+  mutate(Group = case_when(
+                Group == "AMF" ~ "F.amf",
+                Group == "SaproF" ~ "F.s",
+                Group == "Gneg" ~ "B.Gneg",
+                Group == "firmicutes" ~ "B.Gpos",
+                Group == "Bacterivores" ~ "Ne.B",
+                Group == "Facultatives phyophages" ~ "Ne.fPh",
+                Group == "Fungivores" ~ "Ne.F",
+                Group == "Phytoparasites" ~ "Ne.PhP",
+                Group == "Omnivores" ~ "Ne.Omn",
+                Group == "Predators" ~ "Ne.P",
+                Group == "Epe" ~ "Cla.Epe",
+                Group == "Hem" ~ "Cla.Hem",
+                Group == "Gam" ~ "Me")) %>% 
+  write_csv2("SFW_data_tidy/AbsorptionEffFauna.csv") 
+
+```
+
+
+## Basal resources
+
+## Absorption efficiencies
+
+Absorption efficiencies for plant derived resources are calculated from measured N content with the same formula as above. We separated leaf and root litter because their characteristics differ.
+
+## Biomass 
+
+1. We chose to estimate fine root biomass per square meter from root density measured from 14cm-deep core sample. The consequence of this choice we made is that we underestimate a bit the roots quantity for species with an important tap root (**Rumex acetosa*, *Medicago sativa* but also to a lesser extend maybe *Nardus stricta* and *Holcus lanatus* - we don't know why, see file "sandbox - Roots and Rhizodeposition from more infos).
+
+2. Resources for micro-organisms were estimated based on the relative enrichement of DOM in ^15^N for litter and ^13^C for rhizodeposition. 
+
+3. Litter biomass (available for micro-arthropods but not micro-organisms) was calculated from inputs at the begining of the experiment (0.73 g of root litter and 1.47 g of leaf litter in each pot).
+
+```{r basal.resources}
+d = 0.8 #soil volumetric  mass density kg/L
+V.coresample = #L because 1 dm3 = 1L
+  (0.25^2 * pi *1.4) * #length in dm
+  3 #3 core samples
+
+#efficiences
+BasalsEff <- 
+  read_csv2("data_tidy/DataPES.csv") %>% 
+  
+  ## plants
+  select(Numero, Sp, gf, mod, Bloc, Root_N) %>% 
+  #we estimate absorption efficiency from fine roots N_content as they are the most likely to be consumed
+  bind_rows(
+    tibble(Numero = rep(c(31:45), 3),
+       Sp = rep(c("N.s." , # 31
+         "F.o." , # 32
+         "A.o." , # 33
+         "D.g." , # 34
+         "H.l." , # 35
+         "G.v." , # 36
+         "C.r." , # 37
+         "P.l." , # 38
+         "C.n." , # 39
+         "R.a." , # 40
+         "M.a." , # 41
+         "T.p." , # 42
+         "L.c." , # 43
+         "M.s." , # 44
+         "T.r." ), 3), # 45 
+       Bloc = c(rep("A", 15), rep("B",15), rep("C",15)),
+       mod = rep("L", 45),
+       gf = c(rep(c(rep("Grass", 5), rep("Forbs", 5), rep("Leg", 5)), 3)),
+       Root_N = rep(NA, 45))) %>% 
+  rename(Root_N.FR = Root_N) %>% 
+  
+  ##litter
+  left_join(
+    read_csv("data_tidy/DataIsoLit.csv") %>% 
+              select(Sp, Type, N_amount) %>%
+              pivot_wider(names_from = Type, 
+                          names_prefix = "Root_N.", 
+                          values_from = N_amount)) %>% 
+  pivot_longer(c(starts_with("Root_N")), 
+               names_to = c("Group"),
+               values_to = "Root_N") %>% 
+  mutate(Root_N = if_else(Numero < 16 & 
+                            (Group %in% c("Root_N.PS", "Root_N.PA")),
+                          NA,
+                          Root_N)) %>% 
+  drop_na(Root_N) %>% 
+  mutate(Group = str_remove(Group, "Root_N."),
+         AbsorptionEff = exp(0.471 * Root_N/100 - 2.097)/ (1 + exp(0.471 * Root_N/100 - 2.097))) %>%
+  mutate(Group = case_when(
+    Group == "FR" ~ "P.FR",
+    Group == "PS" ~ "P.rL",
+    Group == "PA" ~ "P.lL"
+  )) %>% 
+  
+  #Biomass
+
+  ## adding plant masses converted to g/m2
+  left_join(
+    read_csv2("data_tidy/PlantBiomasses.csv") %>%
+      mutate(Biomass = #g/m2
+               R_Dmass_carottes/V.coresample * #root density #g/L = g/dm3
+               7 / #depth
+               1000 * #cm3/cm2 / 1000 = dm3/cm2 = L/cm2
+               10000,  # g/cm2 *10 000 = g/m2
+             Group = "P.FR"
+      ) %>%
+      select(Numero, Bloc, Group, Biomass)
+  ) %>%
+  select(Numero, Bloc, Sp, mod, gf, Group, AbsorptionEff, Biomass) %>%
+  
+  ##adding litter masses converted to m2
+  
+  mutate(Group = as.factor(Group),
+         Biomass =
+           case_when(
+             Group == "P.rL" ~ 0.73 / #g what we put per pot 
+               (pi*11.25^2)* #cm2 (11.25 is the mean radius of the pot)
+                 10000, # g/cm2 *10 000 = g/m2
+             Group == "P.lL" ~ 1.47 / #g what we put per pot
+               (pi*11.25^2)* #cm2 (11.25 is the mean radius of the pot)
+               10000, # g/cm2 *10 000 = g/m2
+               .default =  Biomass
+             ))
+
+write_csv2(BasalsEff, "SFW_data_tidy/BasalResources2.csv")
+
+
+
+BasalsEff%>%
+  group_by(mod, Group) %>%
+  summarise(mean.Biomass = mean(Biomass, na.rm = T),
+            max = max(Biomass, na.rm = T),
+            min = min(Biomass, na.rm = T)) %>%
+  arrange(mod, Group)
+```
+
+
+# Completion of input table
+
+```{r full.M.MN}
+
+full.M.MN <- 
+  Microbes.m2 %>% 
+  mutate(Numero = as.double(Numero),
+         Group = case_when(
+           Group == "AMF" ~ "F.amf",
+           Group == "SaproF" ~ "F.s",
+           Group == "Gneg" ~ "B.Gneg",
+           Group == "Gpos" ~ "B.Gpos"
+         )) %>% 
+  rename(Biomass = gBiomPerM2, 
+         MetabolicNeed = MN.perM2) %>% 
+  bind_rows(Microarthropods %>% 
+              mutate(Group = if_else(Group == "Gam",
+                                     "Me",
+                                     str_c("Cla.", Group))) %>% 
+              rename(Biomass = FreshMass.g.m2,
+                     MetabolicNeed = MN.J.y.m2)) %>% 
+  bind_rows(Nematodes %>% 
+              mutate(TrophicGroup = case_when(
+                TrophicGroup == "Bacterivores" ~ "Ne.B",
+                TrophicGroup == "Facultative phytophages" ~ "Ne.fPh",
+                TrophicGroup == "Fongivores" ~ "Ne.F",
+                TrophicGroup == "Phytoparasites" ~ "Ne.PhP",
+                TrophicGroup == "Omnivores" ~ "Ne.Omn",
+                TrophicGroup == "Predators" ~ "Ne.P"
+              )) %>% 
+              rename(MetabolicNeed = MN.TG.nem.J.y.m2 ,
+                     Biomass = Mass.TG.nem.g.m2,
+                     Group = TrophicGroup)) %>% 
+  left_join(read_csv2("SFW_data_tidy/AbsorptionEffFauna.csv") %>% 
+              select(Group, ea)) %>% 
+  bind_rows(BasalsEff %>% 
+              mutate(MetabolicNeed = 0) %>% 
+              rename(ea = AbsorptionEff)
+              ) %>% 
+  mutate(Group = factor(Group, 
+                        levels = c("P.FR" , "P.rL" , "P.lL", "P.dL", "P.Rh" , "S", 
+                                   "B.Gpos", "B.Gneg", "F.s", "F.amf",
+                                   "Ne.PhP", "Ne.fPh", "Ne.B", "Ne.F", "Ne.Omn", "Ne.P", 
+                                   "Me", "Cla.Epe", "Cla.Hem"),
+                        ordered = TRUE),
+         NumeroBloc = factor(str_c(Numero, ".", Bloc)),
+         .after = Bloc) %>% 
+  arrange(Bloc, Numero, Group)
+
+# allows us to get every modality
+expanded.M.MN <- 
+  read_csv2("SFW_database/NumeroSpModGF.csv") %>% 
+  mutate(Group = NA,
+         NumeroBloc = factor(str_c(Numero, ".", Bloc))) %>% 
+  mutate(Group = factor(Group, 
+                        levels = c("P.FR" , "P.rL" , "P.lL", "P.dL", "P.Rh" , "S", 
+                                   "B.Gpos", "B.Gneg", "F.s", "F.amf",
+                                   "Ne.PhP", "Ne.fPh", "Ne.B", "Ne.F", "Ne.Omn", "Ne.P", 
+                                   "Me", "Cla.Epe", "Cla.Hem"),
+                        ordered = TRUE)) %>% 
+  #select(Group, NumeroBloc) %>% 
+  expand(Group, NumeroBloc)%>% 
+  arrange(NumeroBloc) %>% 
+  separate(NumeroBloc, into = c("Numero", "Bloc"), remove = FALSE) %>% 
+  left_join(read_csv2("SFW_database/NumeroSpModGF.csv") %>% 
+              mutate(Numero=as.character(Numero))) %>% 
+  drop_na(Group) 
+  
+
+full.M.MN.J.y <- 
+  expanded.M.MN %>% 
+  left_join(full.M.MN %>% 
+              select(Numero, Bloc, Group, MetabolicNeed, Biomass, ea) %>% 
+              mutate(Numero = as.character(Numero),
+                     Group = as.character(Group))) %>% 
+  mutate(across(where(is.numeric),
+                ~ if_else(is.na(MetabolicNeed) &
+                   is.na(Biomass),
+                 0, 
+                 .)),
+         Biomass = if_else(Group == "S" |
+                             (Group == "P.dL") & mod %in% c("Pl+L", "L") |
+                              (Group == "P.Rh") & mod %in% c("Pl", "Pl+L"),
+                           1, Biomass),
+         ea = if_else(Group %in% c("S", "P.dL", "P.Rh"), 1, ea)
+         ) %>% 
+  filter(Biomass > 0)
+
+
+full.M.MN.kJ.d <- 
+  expanded.M.MN %>% 
+  left_join(full.M.MN %>% 
+              select(Numero, Bloc, Group, MetabolicNeed, Biomass, ea) %>% 
+              mutate(Numero = as.character(Numero),
+                     Group = as.character(Group))) %>% 
+  mutate(across(where(is.numeric),
+                ~ if_else(is.na(MetabolicNeed) &
+                   is.na(Biomass),
+                 0, 
+                 .)),
+         Biomass = if_else(Group == "S" |
+                             (Group == "P.dL") & mod %in% c("Pl+L", "L") |
+                              (Group == "P.Rh") & mod %in% c("Pl", "Pl+L"),
+                           1, Biomass),
+         ea = if_else(Group %in% c("S", "P.dL", "P.Rh"), 1, ea)
+         ) %>% 
+  mutate(MetabolicNeed = MetabolicNeed /360 *10^{-3}) %>% 
+  filter(Biomass > 0)
+
+rm(expanded.M.MN)
+
+
+levels(as.factor(full.M.MN.kJ.d$Group))
+```
+
+
+
+
+```{r}
+#save("full.M.MN.J.y", file = "object/full.M.MN.J.y.Rdata")
+save("full.M.MN.kJ.d", file = "object/full.M.MN.kJ.d.Rdata")
+```
+
+
+
+
+
+
+
+
+

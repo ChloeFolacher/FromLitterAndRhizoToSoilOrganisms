@@ -1,0 +1,14 @@
+Type;Group;N.content
+Bacteria;firmicutes;0,11
+Bacteria;Gneg;0,11
+Fungi;AMF;0,032
+Fungi;SaproF;0,032
+Nematodes;Bacterivores;0,053
+Nematodes;Facultatives phyophages;0,053
+Nematodes;Fungivores;0,053
+Nematodes;Phytoparasites;0,053
+Nematodes;Omnivores;0,053
+Nematodes;Predators;0,053
+Microarthr;Epe;0,109
+Microarthr;Hem;0,109
+Microarthr;Gam;0,105

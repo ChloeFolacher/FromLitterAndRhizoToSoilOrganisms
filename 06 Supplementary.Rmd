@@ -1,0 +1,853 @@
+---
+title: "Supplementary"
+output: html_document
+date: "2025-10-10"
+---
+
+
+```{r packages}
+
+library(tidyverse)
+library(plotrix)
+library(cowplot)
+library(ggtext)
+
+load("mypalettes.RData")
+```
+
+
+
+```{r check-fRhS}
+
+F_out.µ <- 
+  full.M.MN.kJ.d %>% 
+  filter(Group %in% c("B.Gpos", "B.Gneg", "F.s", "F.amf")) %>% 
+  select(-Biomass, - ea) %>% 
+  left_join(
+    complete_fluxes %>% 
+      filter(From %in% c("B.Gpos", "B.Gneg", "F.s", "F.amf")) %>% 
+      group_by(Numero, Bloc, mod, From) %>% 
+      summarise(Flux = sum(Flux)) %>% 
+      rename(Group = From)
+  ) %>% 
+  mutate(F_out.µ = MetabolicNeed + Flux) %>% 
+  select(-MetabolicNeed, - Flux)
+
+check <- 
+  F_out.µ %>% 
+  left_join(
+    data.prop.label.µGroups %>%
+      select(-PropLabGroup) %>% 
+      pivot_wider(names_from = Node, values_from = N_C_lab_group) %>% 
+      mutate(across(where(is.numeric),
+                    ~ .x / F.amf)) %>% 
+      pivot_longer(cols = 4:7, names_to = "Group", values_to = "fAMF.µ")
+    ) %>% 
+  group_by(NumeroBloc) %>% 
+  mutate(
+    Rh_in.AMF = (1 - 1e-9)*F_out.µ[Group == "F.amf"],
+    Rh_in = 
+      if_else(Group == "F.amf", 
+              Rh_in.AMF,
+              fAMF.µ * Rh_in.AMF),
+    Check = Rh_in/F_out.µ
+    ) 
+
+  
+check %>% 
+  filter(mod %in% c("Pl", "Pl+L") & !is.na(Check) ) %>% 
+  group_by(NumeroBloc) %>% 
+  summarise(over1 = sum(Check > 1)) %>% 
+  ungroup() %>% 
+  summarise(sum (over1 > 0) / n()) 
+
+```
+
+# Table of litter quality
+
+```{r}
+data.lit.prop <- 
+  read_csv2("data_tidy/DataLitterTraits.csv") %>% 
+  group_by(Sp, Type) %>% 
+  dplyr::summarise(across(where(is.numeric), 
+                          ~ mean(.x, na.rm=T))) %>% 
+  ungroup() %>%
+  left_join(
+    tibble(Type = c("PA", "PS"),
+           frac = c(1.5/2.2, 0.7/2.2)) # weighted average between shoot (PA) and root (PS) litter
+  ) %>% 
+  dplyr::mutate(across(where(is.numeric),
+                       ~.x * frac)) %>% 
+  group_by(Sp) %>% 
+  dplyr::summarise(across(where(is.numeric),
+                          ~ sum(.x)
+  )
+  ) %>% 
+  select(-frac) %>% 
+  dplyr::mutate(CNratio = CperMS/NperMS,
+                ligNratio = lignines/NperMS,
+                NPratio = NperMS/P,
+                celluloses = hemi.cellulose+cellulose) #%>% 
+  # dplyr::mutate(across(where(is.numeric),
+  #                      ~ if_else(is_extreme(.x), 
+  #                                NA, .x))
+
+data.lit.prop
+
+data.lit.prop %>% 
+  mutate(across(c(soluble, hemi.cellulose, cellulose, lignines, NperMS, CperMS, cendres),
+                ~ round(.x*100, 1))) %>% 
+  mutate(across(where(is.numeric),
+                ~ round(.x, 3))) %>% 
+  select(Sp, lignines, cellulose, hemi.cellulose, soluble, cendres, CperMS, NperMS, P, K, Ca, Mg, Mn, CNratio, ligNratio, NPratio)
+
+
+data.lit.prop %>% 
+  select(Sp, NperMS, P) %>% 
+  mutate(NPratio = round(NperMS*1000/P, 2))
+```
+
+
+# Tables of models
+
+```{r fluxes}
+
+table.models.log.sc %>% 
+  rowwise() %>% 
+  dplyr::mutate(dif = if_else(
+    cond = Estimate*CI.inf > 0, 
+    true = max(abs(Estimate), abs(CI.inf)) - 
+      min(abs(Estimate), abs(CI.inf)),
+    false = Estimate - CI.inf
+  ),
+  text = 
+    paste0(
+      round(Estimate, 2), 
+      " ± ",
+      round(dif, 2)
+    )
+  ) %>% 
+  select(RespV, Parameter, text) %>% 
+  pivot_wider(names_from = Parameter, values_from = text) %>% 
+  dplyr::mutate(
+      RespV = case_when(
+        RespV == "som.decomp" ~ "SOM cons.",
+        RespV == "litter.decomp" ~ "Litter cons.",
+        RespV == "rhizoflux" ~ "Rhizodep. cons.",
+        RespV == "predation" ~ "Predation",
+        RespV == "fungivory" ~ "Fungivory",
+        RespV == "bacterivory" ~ "Bacterivory",
+        RespV == "herbivory" ~ "Herbivory",
+        RespV == "total" ~ "Total"
+      ),
+      RespV = factor(RespV, 
+                         levels =c("Total", "Predation", 
+                                   "Fungivory", "Bacterivory",
+                                   "SOM cons.", "Litter cons.",
+                                   "Rhizodep. cons.","Herbivory"))
+  ) %>% 
+  arrange(RespV) %>% 
+  left_join(sumR2m(models.log.sc) %>% 
+              mutate(across(where(is.numeric), 
+                     ~ str_c(.x, " %"))
+                     )
+            )
+
+#### -----
+sum.coefs.lit %>% 
+  rowwise() %>% 
+  dplyr::mutate(dif = if_else(
+    cond = Estimate*CI.inf > 0, 
+    true = max(abs(Estimate), abs(CI.inf)) - 
+      min(abs(Estimate), abs(CI.inf)),
+    false = Estimate - CI.inf
+  ),
+  text = 
+    paste0(
+      round(Estimate, 2), 
+      " ± ",
+      round(dif, 2)
+    )
+  ) %>% 
+  select(RespV, Parameter, text) %>% 
+  pivot_wider(names_from = Parameter, values_from = text) %>% 
+  left_join(sumR2m(models.lit) %>% 
+              separate_wider_delim(RespV, delim = "~", names = c("RespV", "Formula")) %>% 
+              select(-Formula) %>% 
+              mutate(across(where(is.numeric), 
+                     ~ str_c(.x, " %"))
+                     )
+            ) %>% 
+  dplyr::mutate(
+      RespV = case_when(
+        RespV == "som.decomp" ~ "SOM cons.",
+        RespV == "litter.decomp" ~ "Litter cons.",
+        RespV == "rhizoflux" ~ "Rhizodep. cons.",
+        RespV == "predation" ~ "Predation",
+        RespV == "fungivory" ~ "Fungivory",
+        RespV == "bacterivory" ~ "Bacterivory",
+        RespV == "herbivory" ~ "Herbivory",
+        RespV == "total" ~ "Total"
+      ),
+      RespV = factor(RespV, 
+                         levels =c("Total", "Predation", 
+                                   "Fungivory", "Bacterivory",
+                                   "SOM cons.", "Litter cons.",
+                                   "Rhizodep. cons.","Herbivory"))
+  ) %>% 
+  arrange(RespV) 
+
+
+#### -----
+sum.coefs.strat %>% 
+  rowwise() %>% 
+  dplyr::mutate(dif = if_else(
+    cond = Estimate*CI.inf > 0, 
+    true = max(abs(Estimate), abs(CI.inf)) - 
+      min(abs(Estimate), abs(CI.inf)),
+    false = Estimate - CI.inf
+  ),
+  text = 
+    paste0(
+      round(Estimate, 2), 
+      " ± ",
+      round(dif, 2)
+    )
+  ) %>% 
+  select(RespV, Parameter, text) %>% 
+  pivot_wider(names_from = Parameter, values_from = text) %>% 
+  left_join(sumR2m(models.strat) %>% 
+              separate_wider_delim(RespV, delim = "~", names = c("RespV", "Formula")) %>% 
+              select(-Formula) %>% 
+              mutate(across(where(is.numeric), 
+                     ~ str_c(.x, " %"))
+                     )
+            ) %>% 
+  dplyr::mutate(
+      RespV = case_when(
+        RespV == "som.decomp" ~ "SOM cons.",
+        RespV == "litter.decomp" ~ "Litter cons.",
+        RespV == "rhizoflux" ~ "Rhizodep. cons.",
+        RespV == "predation" ~ "Predation",
+        RespV == "fungivory" ~ "Fungivory",
+        RespV == "bacterivory" ~ "Bacterivory",
+        RespV == "herbivory" ~ "Herbivory",
+        RespV == "total" ~ "Total"
+      ),
+      RespV = factor(RespV, 
+                         levels =c("Total", "Predation", 
+                                   "Fungivory", "Bacterivory",
+                                   "SOM cons.", "Litter cons.",
+                                   "Rhizodep. cons.","Herbivory"))
+  ) %>% 
+  arrange(RespV) 
+```
+
+```{r fb-ratios}
+
+ coefs %>% 
+  rowwise() %>% 
+  dplyr::mutate(dif = if_else(
+    cond = Estimate*CI.inf > 0, 
+    true = max(abs(Estimate), abs(CI.inf)) - 
+      min(abs(Estimate), abs(CI.inf)),
+    false = Estimate - CI.inf
+  ),
+  text = 
+    paste0(
+      round(Estimate, 2), 
+      " ± ",
+      round(dif, 2)
+    )
+  ) %>% 
+  select(RespV, Parameter, text) %>% 
+  pivot_wider(names_from = Parameter, values_from = text) %>% 
+  left_join(sumR2m(models.fig.3) %>% 
+              mutate(across(where(is.numeric), 
+                     ~ str_c(.x, " %"))
+                     )
+            )
+
+#### -----
+sum.coefs.lit %>% 
+  rowwise() %>% 
+  dplyr::mutate(dif = if_else(
+    cond = Estimate*CI.inf > 0, 
+    true = max(abs(Estimate), abs(CI.inf)) - 
+      min(abs(Estimate), abs(CI.inf)),
+    false = Estimate - CI.inf
+  ),
+  text = 
+    paste0(
+      round(Estimate, 2), 
+      " ± ",
+      round(dif, 2)
+    )
+  ) %>% 
+  select(RespV, Parameter, text) %>% 
+  pivot_wider(names_from = Parameter, values_from = text) %>% 
+  left_join(sumR2m(models.lit) %>% 
+              separate_wider_delim(RespV, delim = "~", names = c("RespV", "Formula")) %>% 
+              select(-Formula) %>% 
+              mutate(across(where(is.numeric), 
+                     ~ str_c(.x, " %"))
+                     )
+            ) %>% 
+  dplyr::mutate(
+      RespV = case_when(
+        RespV == "som.decomp" ~ "SOM cons.",
+        RespV == "litter.decomp" ~ "Litter cons.",
+        RespV == "rhizoflux" ~ "Rhizodep. cons.",
+        RespV == "predation" ~ "Predation",
+        RespV == "fungivory" ~ "Fungivory",
+        RespV == "bacterivory" ~ "Bacterivory",
+        RespV == "herbivory" ~ "Herbivory",
+        RespV == "total" ~ "Total"
+      ),
+      RespV = factor(RespV, 
+                         levels =c("Total", "Predation", 
+                                   "Fungivory", "Bacterivory",
+                                   "SOM cons.", "Litter cons.",
+                                   "Rhizodep. cons.","Herbivory"))
+  ) %>% 
+  arrange(RespV) 
+
+
+#### -----
+sum.coefs.strat %>% 
+  rowwise() %>% 
+  dplyr::mutate(dif = if_else(
+    cond = Estimate*CI.inf > 0, 
+    true = max(abs(Estimate), abs(CI.inf)) - 
+      min(abs(Estimate), abs(CI.inf)),
+    false = Estimate - CI.inf
+  ),
+  text = 
+    paste0(
+      round(Estimate, 2), 
+      " ± ",
+      round(dif, 2)
+    )
+  ) %>% 
+  select(RespV, Parameter, text) %>% 
+  pivot_wider(names_from = Parameter, values_from = text) %>% 
+  left_join(sumR2m(models.strat) %>% 
+              separate_wider_delim(RespV, delim = "~", names = c("RespV", "Formula")) %>% 
+              select(-Formula) %>% 
+              mutate(across(where(is.numeric), 
+                     ~ str_c(.x, " %"))
+                     )
+            ) %>% 
+  dplyr::mutate(
+      RespV = case_when(
+        RespV == "som.decomp" ~ "SOM cons.",
+        RespV == "litter.decomp" ~ "Litter cons.",
+        RespV == "rhizoflux" ~ "Rhizodep. cons.",
+        RespV == "predation" ~ "Predation",
+        RespV == "fungivory" ~ "Fungivory",
+        RespV == "bacterivory" ~ "Bacterivory",
+        RespV == "herbivory" ~ "Herbivory",
+        RespV == "total" ~ "Total"
+      ),
+      RespV = factor(RespV, 
+                         levels =c("Total", "Predation", 
+                                   "Fungivory", "Bacterivory",
+                                   "SOM cons.", "Litter cons.",
+                                   "Rhizodep. cons.","Herbivory"))
+  ) %>% 
+  arrange(RespV) 
+```
+
+
+# Breaking down complete fluxes
+
+```{r FigSM2.1, include = T, fig.height = 6, fig.width=8}
+
+complete_fluxes %>% 
+  filter(node_type_to == "microbes") %>% 
+  mutate(flux_type = if_else(flux_type == "rhizoflux" & To == "F.amf",
+                             "herbivory", #just for the coloration
+                             flux_type)
+         ) %>% 
+  mutate(flux_type = ordered(flux_type,
+                             rev(c("herbivory", "rhizoflux", "litter.decomp", "som.decomp")))) %>% 
+  arrange(mod, flux_type) %>% 
+  left_join(
+    tibble(To = c("B.Gpos", "B.Gneg", "F.s", "F.amf"),
+           Group = c("Bacteria", "Bacteria", "Fungi", "Fungi"))
+  ) %>% 
+  group_by(Group, mod, flux_type) %>% 
+  summarise(
+    Flux_mean = mean(Flux, na.rm = TRUE),
+    sem = std.error(Flux, na.rm = TRUE)
+  ) %>% 
+  mutate(y_sem = cumsum(Flux_mean)) %>%
+  mutate(flux_type = ordered(flux_type,
+                             c("herbivory", "rhizoflux", "litter.decomp", "som.decomp"))) %>%
+  ungroup() %>% 
+  ggplot(aes(x = mod, y = Flux_mean, 
+             fill = flux_type)
+  ) +
+  facet_grid(~Group) +
+  geom_bar(stat = "identity", position = "stack",
+           aes(fill = flux_type)) +
+  geom_linerange(aes(ymin = y_sem -sem*1.96, ymax = y_sem + sem*1.96, color = flux_type), 
+                 linewidth = 0.75,
+                 position = position_dodge(0.2) # Adjust jittering
+  )+
+  scale_fill_manual(values = alpha(paletteFUN, 0.4)) +
+  #scale_pattern_color_manual(values = alpha(paletteFUN, 0.8))+
+  scale_color_manual(values = paletteFUN) +
+  
+  theme_light() +
+  theme(
+    #strip.background = element_rect(fill = "#11111111"),
+    legend.position = "none",
+    #strip.placement = "outside",
+    strip.text = element_text(color = "black",
+                              #angle = -90,
+                              size = 20),
+    axis.text = element_text(size = 18),
+    axis.title = element_text(size = 22),
+    plot.caption = element_text(lineheight = 0.9, 
+                                size = 14, 
+                                face = "italic", 
+                                color = "darkgrey")
+    )+
+  labs(x = "Treatment",
+       y = expression(Mean~fluxes~(kJ %.% day^{-1} %.% m^{-2})),
+       color = "Fluxes from",
+       fill =  "Fluxes from",
+       caption = "C: control, L: litter-only, P: Plant-only, P+L: Plant+Litter \n
+       Flux origin - SOM: light brown, Litter: brown, 
+       Rhizodeposits: green (to AMF) or yellow (to others). ")
+
+ggsave("Figures/FigSM2.1_BreakingDownFluxesFB.png")
+```
+
+
+```{r FigSM2.2,include = T, fig.height = 6, fig.width=8}
+complete_fluxes %>% 
+  select(-c(trophic_level_from, node_type_from, node_type_to)) %>% 
+  filter(From %in% c("B.Gpos","B.Gneg", "F.s", "F.amf")) %>% 
+  mutate(To = ordered(To,
+                      rev(c("Ne.PhP", "Ne.fPh", "Ne.B", "Ne.F", "Ne.Omn",
+                            "Cla.Epe", "Cla.Hem")))) %>% 
+  group_by(mod, To, flux_type) %>%  
+  summarise(Flux_mean = mean(Flux),
+            sem = std.error(Flux)) %>%
+  group_by(mod, flux_type) %>% 
+  mutate(y_sem = cumsum(Flux_mean)) %>% 
+  mutate(To = ordered(To,
+                      c("Ne.PhP", "Ne.fPh", "Ne.B", "Ne.F", "Ne.Omn",
+                            "Cla.Epe", "Cla.Hem")),
+         flux_type = str_to_title(flux_type) ) %>% 
+  
+  ggplot(aes(x = mod, y = Flux_mean))+
+  facet_grid(~ ordered(flux_type, levels =c("Bacterivory", "Fungivory")))+
+  geom_bar(stat = "identity",# position = "dodge",
+           aes(fill = To)) +
+  geom_linerange(aes(ymin = y_sem -sem*1.96, ymax = y_sem + sem*1.96, color = To), 
+                 linewidth = 0.75,
+                 position = position_dodge(0.2) # Adjust jittering
+  )+
+  
+  scale_fill_manual(values = alpha(paletteGroups, 0.6))+
+  scale_color_manual(values = paletteGroups)+
+  labs(#title = "Contribution to fungivory and bacterivory",
+       x = "Treatment",
+       y = expression("Mean fluxes" ~(kJ %.% day^{-1} %.% m^{-2})),
+       caption = "Color indicates flux destination.
+                  Ne: nematodes – PhP: phytophage, fPh: facultative phytophage,
+                  B: bacterivorous, F:fungivorous, Omn: ominivores \n
+                  Cla: collembola – Epe: epedaphic, Hem: hemiedaphic.",
+       color = "Fluxes to",
+       fill =  "Fluxes to"
+       )+
+  theme_light()+
+  theme(
+    #strip.background = element_rect(fill = "#11111111"),
+    legend.position = "bottom",
+    #strip.placement = "outside",
+    strip.text = element_text(color = "black",
+                              #angle = -90,
+                              size = 20),
+    axis.text = element_text(size = 18),
+    axis.title = element_text(size = 22),
+    plot.caption = element_text(lineheight = 0.9, 
+                                size = 14, 
+                                face = "italic", 
+                                color = "darkgrey")
+    )
+
+ggsave("Figures/FigSM2.2_BreakingDownFluxesOry.png")
+```
+# Isotopic signature of micro-arthropods
+
+```{r data-iso-meso-models}
+data.iso.meso <- 
+  read.csv("data_tidy/DataIsoMeso.csv") %>% 
+  select(1:6, APE15N, APE13C) %>% 
+  mutate(Group = 
+           case_when(
+             Group == "epi" ~ "Cla.epi",
+             Group == "hem" ~ "Cla.hem",
+             Group == "gam" ~ "Me"
+           ),
+         Numero = as.character(Numero)) %>% 
+  mutate(APE15N = if_else(mod %in% c("P", "T") | APE15N < 0,
+                          NA, APE15N),
+         APE13C = if_else(mod %in% c("L", "T") | APE13C < 0,
+                          NA, APE13C)) %>% 
+  mutate(L = as.factor(if_else(mod == "P+L" | mod == "L",
+                               1, 0)),
+         P = as.factor(if_else(mod == "P" | mod == "P+L",
+                               1, 0)),
+         Sp = if_else(is.na(Sp), 
+                      "T", Sp),
+         gf = if_else(is.na(gf), 
+                      "T", gf)#,
+  )
+
+data.iso.model <- 
+  data.iso.meso %>% 
+  mutate(across(where(is.numeric),
+               ~ log(.x))
+         ) %>% 
+  group_by(Group) %>% 
+  mutate(across(where(is.numeric),
+                ~ scale(.x))) 
+```
+
+```{r models.meso}
+
+filt.group <- c("Cla.epi", "Cla.hem", "Me")
+
+models.15N <- map(filt.group, function(group){
+    data.subset <- 
+      data.iso.model %>%
+      select(- APE13C) %>% 
+      filter(Group %in% group) %>% 
+      drop_na()
+    # Fit the model using lmer
+    model <- lmer(formula = "APE15N ~ P + (1 | Bloc) + (1|Sp)", 
+                  data = data.subset, na.action = "na.fail"
+    )
+}
+)
+names(models.15N) <- filt.group
+
+models.13C <- map(filt.group, function(group){
+    # Dynamically construct the formula for each column
+    data.subset <- 
+      data.iso.model %>%
+      select(- APE15N) %>% 
+      filter(Group %in% group) %>% 
+      drop_na()
+    # Fit the model using lmer
+    model <- lmer(formula = "APE13C ~ L + (1 | Bloc) + (1|Sp)", 
+                  data = data.subset, na.action = "na.fail"
+    )
+}
+)
+names(models.13C) <- filt.group
+
+table_coefs.meso <- 
+  summarise_coefs(c(models.15N, models.13C)) %>% 
+  rename(Group = RespV) %>% 
+  separate_wider_delim(cols = formula, 
+                       delim = " ~ ",
+                       names = c("APE", "formula"))
+```
+
+
+```{r FigSM2.3, fig.width=12, fig.height = 8, include = T, fig.cap = "Enrichment of microarthropod groups"}
+
+plot_grid(
+  data.iso.meso %>% 
+    filter(mod %in% c("L", "P+L")) %>% 
+    #pivot_longer(c(APE15N, APE13C), names_to = "element", values_to = "APE") %>% 
+    ggplot(aes(x = Group, y = APE15N))+
+    geom_hline(yintercept = 0, color = "grey", linetype = "dashed")+
+    geom_boxplot(outliers = F, 
+                 aes(color = mod)) +
+    geom_richtext(data = 
+                    table_coefs.meso %>% 
+                    filter(APE == "APE15N")%>% 
+                    mutate(Contains0 = if_else(CI.inf * CI.sup < 0,
+                                               "yes", "no")
+                    ),
+                  aes(#x = 0.5, 
+                    y = 2700,
+                    color = Contains0,
+                    label = paste0(
+                      #"<b>", formula, "</b> <br>",  
+                      "*&beta;", " <sub>", Parameter, "</sub>*", " = ", 
+                      round(Estimate, 2), " ± ", 
+                      round(
+                        if_else(Estimate > 0,
+                                CI.sup - Estimate,
+                                abs(CI.inf) - abs(Estimate)), 2))
+                  ),
+                  size = 5,
+                  label.colour = NA,
+                  label.padding = grid::unit(rep(0, 4), "pt"),
+                  hjust = 0.5
+    )+
+    geom_richtext(data = 
+                    sumR2m(models.15N) %>% 
+                    rename(Group = RespV),
+                  
+                  aes(y = -300,
+                      label = paste0("*R<sup>2</sup>m* = ", round(R2m, 2), " % <br>",
+                                     "*R<sup>2</sup>c* = ", round(R2c, 2), "%"
+                      )),
+                  #parse = TRUE,
+                  size = 5,
+                  label.colour = NA,
+                  label.padding = grid::unit(rep(0, 4), "pt"),
+                  hjust = 0.5
+    )+
+    scale_color_manual(values = c(paletteMod,"yes" = "grey60", "no" = "black"))+
+    theme_light() +
+    ylim(c(-350, NA))+
+    theme(legend.position = "none",
+          axis.title = element_text(size = 18),
+          axis.text.x = element_text(size = 18),
+          plot.caption = element_text(size = 15, 
+                                      face = "italic"))+
+    labs(y = expression(APE~{}^{15}*N~(ppm)),
+         x = "", 
+         caption = "Me: mesostigmata, \n Cla.ep: epedaphic springtails, \n Cla.hem: hemiedaphic springtails."),
+  
+  data.iso.meso %>% 
+    filter(mod %in% c("P", "P+L")) %>% 
+    #pivot_longer(c(APE15N, APE13C), names_to = "element", values_to = "APE") %>% 
+    ggplot(aes(x = Group, y = APE13C))+
+    geom_hline(yintercept = 0, color = "grey", linetype = "dashed")+
+    geom_boxplot(outliers = F, 
+                 aes(color = mod)) +
+    geom_richtext(data = 
+                    table_coefs.meso %>% 
+                    filter(APE == "APE13C") %>% 
+                    mutate(Contains0 = if_else(CI.inf * CI.sup < 0,
+                                               "yes", "no")
+                    ),
+                  aes(#x = 0.5, 
+                    y = 550,
+                    color = Contains0,
+                    label = paste0(
+                      #"<b>", formula, "</b> <br>",  
+                      "*&beta;", " <sub>", Parameter, "</sub>*", " = ", 
+                      round(Estimate, 2), " ± ", 
+                      round(
+                        if_else(Estimate > 0,
+                                CI.sup - Estimate,
+                                abs(CI.inf) - abs(Estimate)), 2))
+                  ),
+                  size = 5,
+                  label.colour = NA,
+                  label.padding = grid::unit(rep(0, 4), "pt"),
+                  hjust = 0.5
+    )+
+    geom_richtext(data = 
+                    sumR2m(models.13C) %>% 
+                    rename(Group = RespV),
+                  
+                  aes(y = -40,
+                      label = paste0("*R<sup>2</sup>m* = ", round(R2m, 2), " % <br>",
+                                     "*R<sup>2</sup>c* = ", round(R2c, 2), "%"
+                      )),
+                  #parse = TRUE,
+                  size = 5,
+                  label.colour = NA,
+                  label.padding = grid::unit(rep(0, 4), "pt"),
+                  hjust = 0.5
+    )+
+    scale_color_manual(values = c(paletteMod,"yes" = "grey60", "no" = "black"))+
+    theme_light() +
+    ylim(c(-48, NA))+
+    theme(legend.position = "none",
+          axis.title = element_text(size = 18),
+          axis.text.x = element_text(size = 18),
+          plot.caption = element_text(size = 15,
+                                      face = "italic"))+
+    labs(y = expression(APE~{}^{13}*C~(ppm)),
+         x = "",
+         caption = "Color reflect treatment. \n Brown: Litter-only, \n Dark green: Plant+Litter, \n Light Green: Plant-only."
+         #caption = "Letters show differences at 95% threshold for Mann Whitney test."
+    ),
+  align = "hv",
+  axis = "b"
+  
+)
+
+ggsave("Figures/FigSM2.3_IsoMicroArthropods.png")
+
+```
+
+
+# Lit prop and fluxes correlations
+
+```{r calc-corr-flux-litter-prop}
+
+data.model.lit
+
+resp_vars <- c(response_vars.C, response_vars.L, response_vars.P)
+
+# explanatory variables (list the ones you want)
+expl_vars <- names(data.model.lit)[16:31]
+
+# Compute all pairwise Spearman correlations
+cor_results <- expand_grid(resp.var = resp_vars,
+                           expl.var = expl_vars) %>%
+  mutate(
+    test = map2(resp.var, expl.var, ~ cor.test(data.model.lit[[.x]], data.model.lit[[.y]], 
+                                               method = "spearman",
+                                               exact = FALSE)),
+    r = map_dbl(test, ~ .x$estimate),
+    p = map_dbl(test, ~ .x$p.value)
+  ) %>%
+  select(expl.var, resp.var, r, p)
+
+cor_results %>% 
+  filter(p < 0.1)
+
+```
+
+```{r FigSM2.4}
+cor_results %>% 
+  filter(expl.var != "celluloses") %>% 
+  left_join(read_csv2("SFW_database/DicoLitterProp.csv"),
+            by = join_by(expl.var == litter.prop)
+              ) %>% 
+  mutate(signif = 
+           case_when(
+             p < 0.001 ~ "***",
+             p < 0.01 ~ "**",
+             p < 0.05 ~ "*",
+             p < 0.1 ~ "·"
+           ),
+         resp.var = case_when(
+           resp.var == "total" ~ "Total",
+           resp.var == "som.decomp" ~ "SOM cons.",
+           resp.var == "litter.decomp" ~ "Litter cons.",
+           resp.var == "rhizoflux" ~ "Rhizodep. cons.",
+           resp.var == "predation" ~ "Predation",
+           resp.var == "fungivory" ~ "Fungivory",
+           resp.var == "bacterivory" ~ "Bacterivory",
+           resp.var == "herbivory" ~ "Herbivory"
+         ),
+         resp.var = factor(resp.var, levels =c("Total", "Predation", 
+                                         "Fungivory", "Bacterivory",
+                                         "SOM cons.", "Litter cons.",
+                                         "Rhizodep. cons.","Herbivory")),
+         proper.name = factor(proper.name, 
+                              levels = c("Lignins", "Cellulose", "Hemicellulose", "Soluble", "Ashes",
+                                         "C", "N", "P", "K", "Ca", "Mg", "Mn", 
+                                         "C:N", "Lignins:N", "N:P"))
+        
+         ) %>% 
+  ggplot(aes(x = proper.name, y = resp.var))+
+  geom_point(aes(size = abs(r),
+                 color = r))+
+  geom_text(aes(label = signif), color = "black")+
+  scale_colour_gradient2(limits = c(-1,1))+
+  scale_size_continuous(range = c(1, 5))+
+  theme_light()+
+  labs(x = "Litter properties",
+       y = "Functions", 
+       caption = "Significance levels for Spearman's correlation are indicated in white. \
+                  ***: p < 0.001; **: p < 0.01, *: p < 0.05, ·: p < 0.1")+
+  theme(axis.text.x = element_text(angle = 45, 
+                                   hjust = 1),
+        plot.caption = element_text(#size = 15,
+                                      face = "italic"))
+  
+
+ggsave("Figures/FigSM2.4_CorrLitterProp.png")
+```
+
+## F:B ratios and litter prop
+
+```{r calc-corr-micro-litter-prop}
+
+data.micro.lit <- 
+  complete_fluxes %>% 
+  filter(node_type_to =="microbes" & From == "P.dL") %>% 
+  select(1:5, To, Flux) %>% 
+  pivot_wider(names_from = To, values_from = Flux) %>% 
+  left_join(
+    data.lit.prop %>% 
+  select(Sp) %>% 
+  bind_cols(as_tibble(PCA.rot$ind$coord))
+  )
+
+resp_vars <- c("dim1.rot","dim2.rot")
+
+# explanatory variables (list the ones you want)
+expl_vars <- c("B.Gpos", "B.Gneg", "F.s", "F.amf")
+
+# Compute all pairwise Spearman correlations
+cor_results <- expand_grid(resp.var = resp_vars,
+                           expl.var = expl_vars) %>%
+  mutate(
+    test = map2(resp.var, expl.var, ~ cor.test(data.micro.lit[[.x]], data.micro.lit[[.y]], 
+                                               method = "spearman",
+                                               exact = FALSE)),
+    r = map_dbl(test, ~ .x$estimate),
+    p = map_dbl(test, ~ .x$p.value)
+  ) %>%
+  select(expl.var, resp.var, r, p)
+
+cor_results
+
+```
+
+
+## 38B
+
+```{r}
+full.M.MN.kJ.d %>% 
+  ggplot(aes(x = mod, y = Biomass))+
+  facet_wrap(~ Group, scale = "free")+
+  geom_boxplot()+
+  geom_point(data = 
+               full.M.MN.kJ.d %>% 
+               filter(NumeroBloc == "38.B"), color ="red")
+
+microarthr %>% 
+  filter(Group== "hem") %>%
+  left_join(read_csv2("SFW_database/NumeroSpModGF.csv")) %>% 
+  select(Numero, Bloc, mod, m.ind, C.ind, N_tot) %>% 
+  pivot_longer(cols = c(m.ind, C.ind, N_tot), names_to = "var") %>% 
+  ggplot(aes(x = mod, y = value))+
+  facet_wrap(~ var, scale = "free")+
+  geom_boxplot()+
+  geom_point(data = 
+               microarthr %>% 
+               filter(Group== "hem") %>%
+               left_join(read_csv2("SFW_database/NumeroSpModGF.csv")) %>% 
+               select(Numero, Bloc, mod, m.ind, C.ind, N_tot) %>% 
+               pivot_longer(cols = c(m.ind, C.ind, N_tot), names_to = "var")%>% 
+               filter(str_c(Numero,Bloc) == "38B"), 
+             color ="red")
+  
+
+microarthr %>% 
+  filter(Group== "hem") %>% 
+  filter(str_c(Numero,Bloc) == "38B")
+  
+```
+
+
+
+## Nematodes
+
+```{r}
+full.M.MN %>% 
+  filter(str_detect(Group, "Ne.")) %>% 
+  ggplot(aes(x = Group, y = Biomass))+
+  geom_boxplot(outliers = F)
+```
+

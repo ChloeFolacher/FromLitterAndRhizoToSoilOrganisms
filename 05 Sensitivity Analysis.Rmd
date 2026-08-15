@@ -1,0 +1,1123 @@
+---
+title: "Sensitivity analysis"
+output: html_document
+date: "2025-10-29"
+---
+
+
+
+```{r packages}
+library(tidyverse)
+library(ggtext)
+library(deeptime)
+```
+
+
+```{r source-load}
+source("FUN_fluxes_calculation.R")
+source("FUN_vis_fluxes.R")
+source(file = "FUNS_models_TIDY1.R")
+
+load("object/full.M.MN.kJ.d.Rdata")
+load("object/data.calc.Rdata")
+
+
+```
+
+```{r}
+microbes <- c("B.Gpos", "B.Gneg", "F.s", "F.amf")
+```
+
+
+
+```{r}
+MN <- 
+  full.M.MN.kJ.d %>% 
+  dplyr::filter(Group %in% microbes & mod == "Pl+L") %>% 
+  dplyr::group_by(Group) %>% 
+  dplyr::summarise(median = median(MetabolicNeed),
+            mean = mean(MetabolicNeed),
+            CV = sd(MetabolicNeed)/mean)
+
+MN.X <- 
+  MN %>% 
+  select(1:2) %>% 
+  pivot_wider(names_from = Group, values_from = median)
+
+data.calc.RhSr <- data.calc %>% 
+  dplyr::group_by(Group) %>% 
+  dplyr::summarise(RhSr_median = median(RhSr, na.rm = T),
+            RhSr_mean = mean(RhSr, na.rm = T),
+            RhSr_CV = sd(RhSr, na.rm = T)/RhSr_mean)
+
+data.calc.LSr <- data.calc %>% 
+  summarise(LSr_median = median(LSr, na.rm = T),
+            LSr_mean = mean(LSr, na.rm = T),
+            LSr_CV = sd(LSr, na.rm = T)/LSr_mean)
+
+save(MN.X, data.calc.LSr, data.calc.RhSr, file = "object/sensi.objects.Rdata")
+```
+
+```{r}
+data.calc.RhSr
+data.calc.LSr
+
+data.calc %>% 
+  filter(Group == "F.s") %>% 
+  select(1:5, RhSr) %>% 
+  ggplot(aes(x = mod, y = RhSr))+
+  geom_boxplot()
+
+data.calc %>% 
+  filter(Group == "F.s") %>% 
+  select(1:5, RhSr) %>% 
+  filter(RhSr > 10)
+  
+```
+
+
+# Baseline
+
+
+```{r prep}
+
+mat.sensi <- 
+  read_excel("SFW_data_tidy/Matrix.xlsx", sheet = "Sensi") %>% #pred.as.lines
+  select(-Group) %>% 
+  rename(Group = Abbreviation) %>% 
+  mutate(across(2:last_col(),
+                ~ as.numeric(.))) %>% 
+  left_join(data.calc.RhSr %>% 
+              select(Group, RhSr_median)) %>% 
+  mutate(P.Rh = if_else(S == 1, S*RhSr_median, P.Rh),
+         P.dL = if_else(S == 1, S*data.calc.LSr$LSr_median, P.dL)) %>% 
+  select(-RhSr_median) %>% 
+  mutate(across(where(is.numeric),
+                ~ if_else(is.na(.x),
+                          0,
+                          .x))) %>% 
+  
+  drop_na() %>% 
+  column_to_rownames("Group") %>% 
+  as.matrix() %>% 
+  t() #pred.as.columns 
+
+X <- c(0,  0, 0 , MN.X$B.Gpos, MN.X$B.Gneg, MN.X$F.s, MN.X$F.amf)
+names(X) <- colnames(mat.sensi)
+eff <- rep(1,7)
+```
+
+
+```{r fluxing-output}
+base.sensi <- 
+  fluxing(
+    mat = mat.sensi, 
+    biomasses = NULL,
+    losses = X, 
+    efficiencies = eff, 
+    bioms.prefs = FALSE,
+    bioms.losses = FALSE,
+    ef.level = "prey"
+  )
+
+base.rhizoflux <- sum(base.sensi["P.Rh",]) 
+base.litter.decomp <- sum(base.sensi["P.dL",])
+base.som.decomp <- sum(base.sensi["S",])
+
+base.rhizoflux
+base.litter.decomp
+base.som.decomp
+
+base.sensi
+```
+
+# X 
+
+```{r sensi-X, warning=FALSE, message=FALSE}
+
+sensi.X <-
+  function(Group.sensi, variation.seq){
+    #Initialisation 
+
+    fluxes <- list()
+    
+    for(x in variation.seq){
+      load("object/sensi.objects.Rdata")
+      MN.X[Group.sensi] <- MN.X[Group.sensi]*x
+      
+      mat.sensi <- 
+        read_excel("SFW_data_tidy/Matrix.xlsx", sheet = "Sensi") %>% #pred.as.lines
+        select(-Group) %>% 
+        rename(Group = Abbreviation) %>% 
+        mutate(across(2:last_col(),
+                      ~ as.numeric(.))) %>% 
+        left_join(data.calc.RhSr %>% 
+                    select(Group, RhSr_median)) %>% 
+        mutate(P.Rh = if_else(S == 1, S*RhSr_median, P.Rh),
+               P.dL = if_else(S == 1, S*data.calc.LSr$LSr_median, P.dL)) %>% 
+        select(-RhSr_median) %>% 
+        mutate(across(where(is.numeric),
+                      ~ if_else(is.na(.x),
+                                0,
+                                .x))) %>% 
+        
+        drop_na() %>% 
+        column_to_rownames("Group") %>% 
+        as.matrix() %>% 
+        t() #pred.as.columns 
+  
+    
+    X <- c(0,  0, 0 , MN.X$B.Gpos,  MN.X$B.Gneg,  MN.X$F.s, MN.X$F.amf)
+    
+    names(X) <- colnames(mat.sensi)
+    eff <- rep(1,7)
+    
+    fluxes[[as.character(x)]] <- 
+      fluxing(
+        mat = mat.sensi, 
+        biomasses = NULL,
+        losses = X, 
+        efficiencies = eff, 
+        bioms.prefs = FALSE,
+        bioms.losses = FALSE,
+        ef.level = "prey"
+      )
+    
+    }
+   
+     return(fluxes) 
+    }
+
+sensi.RhSr <-
+  function(Group.sensi, variation.seq){
+    #Initialisation 
+
+    fluxes <- list()
+    
+    for(x in variation.seq){
+      load("object/sensi.objects.Rdata")
+      MN.X[Group.sensi] <- MN.X[Group.sensi]
+      
+      mat.sensi <- 
+        read_excel("SFW_data_tidy/Matrix.xlsx", sheet = "Sensi") %>% #pred.as.lines
+        select(-Group) %>% 
+        rename(Group = Abbreviation) %>% 
+        mutate(across(2:last_col(),
+                      ~ as.numeric(.))) %>% 
+        left_join(data.calc.RhSr %>% 
+                    select(Group, RhSr_median)) %>% 
+        mutate(P.Rh = if_else(S == 1, S*RhSr_median, P.Rh),
+               P.Rh = if_else(Group == Group.sensi, P.Rh*x, P.Rh),
+               P.dL = if_else(S == 1, S*data.calc.LSr$LSr_median, P.dL)) %>% 
+        select(-RhSr_median) %>% 
+        mutate(across(where(is.numeric),
+                      ~ if_else(is.na(.x),
+                                0,
+                                .x))) %>% 
+        
+        drop_na() %>% 
+        column_to_rownames("Group") %>% 
+        as.matrix() %>% 
+        t() #pred.as.columns 
+  
+    
+    X <- c(0,  0, 0 , MN.X$B.Gpos,  MN.X$B.Gneg,  MN.X$F.s, MN.X$F.amf)
+    
+    names(X) <- colnames(mat.sensi)
+    eff <- rep(1,7)
+    
+    fluxes[[as.character(x)]] <- 
+      fluxing(
+        mat = mat.sensi, 
+        biomasses = NULL,
+        losses = X, 
+        efficiencies = eff, 
+        bioms.prefs = FALSE,
+        bioms.losses = FALSE,
+        ef.level = "prey"
+      )
+    
+    }
+   
+     return(fluxes) 
+  }
+
+sensi.LSr <-
+  function(Group.sensi, variation.seq){
+    #Initialisation 
+
+    fluxes <- list()
+    
+    for(x in variation.seq){
+      load("object/sensi.objects.Rdata")
+      MN.X[Group.sensi] <- MN.X[Group.sensi]
+      
+      mat.sensi <- 
+        read_excel("SFW_data_tidy/Matrix.xlsx", sheet = "Sensi") %>% #pred.as.lines
+        select(-Group) %>% 
+        rename(Group = Abbreviation) %>% 
+        mutate(across(2:last_col(),
+                      ~ as.numeric(.))) %>% 
+        left_join(data.calc.RhSr %>% 
+                    select(Group, RhSr_median)) %>% 
+        mutate(P.Rh = if_else(S == 1, S*RhSr_median, P.Rh),
+               P.dL = if_else(S == 1, S*data.calc.LSr$LSr_median, P.dL),
+               P.dL = if_else(Group == Group.sensi, P.dL*x, P.dL)
+               ) %>% 
+        select(-RhSr_median) %>% 
+        mutate(across(where(is.numeric),
+                      ~ if_else(is.na(.x),
+                                0,
+                                .x))) %>% 
+        
+        drop_na() %>% 
+        column_to_rownames("Group") %>% 
+        as.matrix() %>% 
+        t() #pred.as.columns 
+  
+    
+    X <- c(0,  0, 0 , MN.X$B.Gpos,  MN.X$B.Gneg,  MN.X$F.s, MN.X$F.amf)
+    
+    names(X) <- colnames(mat.sensi)
+    eff <- rep(1,7)
+    
+    fluxes[[as.character(x)]] <- 
+      fluxing(
+        mat = mat.sensi, 
+        biomasses = NULL,
+        losses = X, 
+        efficiencies = eff, 
+        bioms.prefs = FALSE,
+        bioms.losses = FALSE,
+        ef.level = "prey"
+      )
+    
+    }
+   
+     return(fluxes) 
+    }
+
+```
+
+```{r First-Overview-Sensi, message=F, warning=F, fig.height=4, fig.width=4}
+
+Overview <- 
+  function(Groups, fun){
+    for(Group.sensi in Groups){
+      functions.sensi.X <- 
+        functions_calculation(
+          fun(Group.sensi, my.seq)
+        ) %>% 
+        select(names, rhizoflux, litter.decomp, som.decomp)
+      
+      
+      print(functions.sensi.X %>% 
+              pivot_longer(cols = 2:4, names_to = "flux") %>% 
+              mutate(value = 
+                       case_when(flux == "rhizoflux" ~ value/base.rhizoflux*100,
+                                 flux == "litter.decomp" ~ value/base.litter.decomp*100,
+                                 flux == "som.decomp" ~ value/base.som.decomp*100,)) %>% 
+              mutate(names = as.numeric(names)*100) %>% 
+              
+              ggplot(aes(x = names, y = value))+
+              geom_abline(intercept = 0, slope = 1,  color ="grey", linetype ="dashed")+
+              geom_line(aes(color = flux))+
+              
+              scale_color_manual(values = paletteFUN)+
+              labs(title = Group.sensi)+
+              theme_light()+
+              ylim(c(0, NA))+
+              theme(legend.position = "none")
+            
+      )
+    }
+}
+
+my.seq <- c(0.1, 0.2, 0.5, 0.8, 0.9, 1, 1.25, 1.5, 1.75, 2, 5)
+Overview(microbes, fun = sensi.X)
+Overview(microbes, fun = sensi.RhSr)
+Overview(microbes, fun = sensi.LSr)
+
+
+```
+
+
+```{r Sensi, message = F}
+Sensi <- 
+  function(Groups, my.fun, fun.name){
+    
+    map_dfr(Groups, function(Group.sensi) {
+    functions_calculation(my.fun(Group.sensi, my.seq)) %>%
+      select(names, rhizoflux, litter.decomp, som.decomp, total) %>%
+      pivot_longer(cols = 2:5, names_to = "flux") %>%
+      mutate(
+        value = case_when(
+          flux == "rhizoflux" ~ value / base.rhizoflux * 100,
+          flux == "litter.decomp" ~ value / base.litter.decomp * 100,
+          flux == "som.decomp" ~ value / base.som.decomp * 100,
+          flux == "total" ~ value / (base.rhizoflux+base.litter.decomp+base.som.decomp)*100
+        ),
+        my.x = as.numeric(names) * 100,
+        Group = Group.sensi,
+        Parameter = fun.name
+      )
+  })
+  }
+
+functions_calculation(sensi.X(Group.sensi, my.seq))
+```
+
+
+```{r sensi-comp, message = F}
+my.seq <- c(0.1, 0.2, 0.5, 0.8, 0.9, 1, 1.25, 1.5, 1.75, 2, 3, 4, 5, 8, 10)
+
+sensi.comp <- 
+  Sensi(microbes, my.fun = sensi.X, fun.name = "MN") %>% 
+  bind_rows(
+    Sensi(microbes, my.fun = sensi.RhSr, fun.name = "RhSr")
+  ) %>% 
+  bind_rows(
+    Sensi(microbes, my.fun = sensi.LSr, fun.name = "LSr")
+    )
+```
+
+```{r vis-sensi, fig.width=9, fig.height=6}
+
+sensi.comp %>% 
+  filter(my.x <= 500) %>% 
+  mutate(Parameter = 
+           case_when(Parameter == "MN" ~ "Metabolic Need",
+                     Parameter == "RhSr" ~ "Rh:S",
+                     Parameter == "LSr" ~ "L:S"),
+         Parameter = ordered(Parameter, c("Metabolic Need", "Rh:S", "L:S")),
+         flux = 
+           case_when(
+             flux == "litter.decomp" ~ "Litter decomp.", 
+             flux == "som.decomp" ~ "SOM decomp.",
+             flux == "rhizoflux" ~ "Rhizoflux",
+             flux == "total" ~ "Total"
+           ),
+         flux = ordered(flux, c("Rhizoflux", "Litter decomp.", "SOM decomp.", "Total"))) %>% 
+  ggplot(aes(x = my.x, y = value))+
+  facet_grid_color(Parameter~ flux, 
+                   color = alpha(paletteFUN, 0.6),
+                   scale = "free_y", space = "free_y")+
+  geom_abline(intercept = 0, slope =1, color = "lightgrey", linetype = "dashed")+
+  geom_line(aes(color = Group))+
+  labs(x = "Input variation (%)", y = "Output variation (%)")+
+  scale_color_manual(values = paletteGroups)+
+  #xlim(c(0,500))+
+  theme_light()+
+  theme(#legend.position ="none", 
+        strip.placement = "outside",
+        strip.text = element_text(color ="black", size = 11),
+        axis.text = element_text(size = 10),
+        axis.title = element_text(size = 13)
+  )
+
+
+ggsave("Figures/FigSM_AnalyseSensi.png")
+
+```
+
+# Sensi to fLS
+
+
+## Equations
+
+$$
+
+\left\{
+    \begin{array}{ll}
+        X_i = Rh_i \times e_{a_{Rh}} + L_i \times e_{a_L} + S_i \times e_{a_{S}} \\
+        Rh_i = S_i \times f_{Rh:S_i} \\
+        L_i = S_i \times f_{L:S_i}
+    \end{array}
+\right. \\
+
+\left\{
+    \begin{array}{ll}
+        X_i = S_i \times f_{Rh:S_i} \times e_{a_{Rh}} + S_i \times f_{L:S_i} \times e_{a_L} + S_i \times e_{a_S} \\
+        Rh_i = S_i \times f_{Rh:S_i} \\
+        L_i = S_i \times f_{L:S_i}
+    \end{array}
+\right. \\
+
+\left\{
+    \begin{array}{ll}
+        X_i = S_i ( f_{Rh:S_i} \cdot e_{a_{Rh}}  + f_{L:S_i} \cdot e_{a_{L}} + e_{a_S} ) \\
+        Rh_i = S_i \times f_{Rh:S_i} \\
+        L_i = S_i \times f_{L:S_i}
+    \end{array}
+\right. \\
+
+\left\{
+    \begin{array}{ll}
+        S_i = \frac{X_i}{ f_{Rh:S_i} \cdot e_{a_{Rh}}  + f_{L:S_i} \cdot e_{a_{L}} + e_{a_S} }  \\
+        Rh_i = \frac{X_i}{ f_{Rh:S_i} \cdot e_{a_{Rh}}  + f_{L:S_i} \cdot e_{a_{L}} + e_{a_S} } \times  f_{Rh:S_i} \\
+        L_i = \frac{X_i}{ f_{Rh:S_i} \cdot e_{a_{Rh}}  + f_{L:S_i} \cdot e_{a_{L}} + e_{a_S}} \times f_{L:S_i}
+    \end{array}
+\right. \\
+
+$$
+
+## Sensi of treatment response to f_LS
+
+
+```{r output-PRE-fluxing, message=F, warning = F}
+
+#in this matrix, bacteria and fungi are considered as basal resources (no consumption )
+mat.pred.as.line.apriori <- read_excel("SFW_data_tidy/Matrix.xlsx", sheet = "a priori")
+
+full.M.MN.ap <- 
+  full.M.MN.kJ.d %>% 
+  filter(! Group %in% c("P.Rh", "P.dL", "S")) %>% 
+  mutate(MetabolicNeed = 
+           if_else(Group %in% c("B.Gpos", "B.Gneg", "F.s", "F.amf"),
+                   true = 0,
+                   false = MetabolicNeed)
+         ) 
+  
+
+mat.fluxes.ap <- mat.fluxes_calculation(full.M.MN.ap, 
+                                        mat.pred.as.line.apriori,
+                                        microbes.as.consumers = FALSE)
+
+complete_fluxes.ap <- complete_fluxes_calculation(mat.fluxes.ap)
+
+
+complete_fluxes.ap %>% 
+  filter(node_type_from == "microbes") %>% 
+  group_by(Numero,Bloc, From) %>% 
+  summarise(Losses = (sum(Flux))) %>% 
+  ungroup() %>% 
+  mutate(NumeroBloc = str_c(Numero, ".", Bloc))
+
+
+complete_fluxes.ap %>% 
+  arrange(Numero, Bloc)
+
+complete_fluxes %>% 
+  filter(node_type_to !="microbes") %>% 
+  arrange(Numero, Bloc)
+```
+
+
+```{r fig-2}
+
+eaS = 1
+eaL = 1
+eaRh = 1
+
+calc.data.fig2 <- function(LSr_factor){
+  data.fig2 <- 
+  full.M.MN.kJ.d %>% 
+  filter(NumeroBloc != "38.B") %>% 
+  filter(Group %in% c("B.Gpos", "B.Gneg", "F.s", "F.amf")) %>% 
+  select(-Biomass, - ea) %>% 
+  left_join(data.calc.comp) %>% 
+  left_join(
+    complete_fluxes.ap %>% 
+      filter(node_type_from == "microbes") %>% 
+      dplyr::group_by(Numero,Bloc, From) %>% 
+      dplyr::summarise(Losses = (sum(Flux))) %>% 
+      ungroup() %>% 
+      dplyr::mutate(NumeroBloc = str_c(Numero, ".", Bloc)) %>% 
+      select(-Numero, - Bloc) %>% 
+      dplyr::rename(Group = From)
+  ) %>% 
+  dplyr::mutate(X = MetabolicNeed + Losses) %>% 
+  filter(X !=0) %>% 
+  dplyr::mutate(across(where(is.numeric), 
+                ~ if_else(is.na(.x), 0, .x))) %>% 
+  dplyr::mutate(LSr = LSr*LSr_factor) %>% 
+  dplyr::mutate(S = X /
+           (RhSr*eaRh + LSr*eaL + eaS),
+         Rh = S * RhSr,
+         Lit = S * LSr,
+         Total = S + Rh + Lit) %>%
+  dplyr::mutate(across(where(is.numeric), 
+                ~ if_else(.x== 0, NA, .x))) %>% 
+  select(-c(8:14)) %>% 
+  dplyr::group_by(NumeroBloc, Numero, Bloc, mod) %>% 
+  dplyr::summarise(across(where(is.numeric),
+                   ~ sum(.x, na.rm = T))) %>% 
+  dplyr::mutate(across(where(is.numeric), 
+                ~ if_else(.x== 0, NA, .x))) %>% 
+
+  ungroup() %>% 
+  arrange(as.numeric(Numero), Bloc) %>% 
+  dplyr::mutate(Pl = if_else(str_detect(mod, "Pl"), "1", "0"),
+         L = if_else(str_detect(mod, "L"), "1", "0")) %>% 
+  select(NumeroBloc, Numero, Bloc, mod, L, Pl, everything()) %>% 
+  dplyr::mutate(across(where(is.numeric),
+                ~ if_else(is_extreme(.x), NA, .x)))
+  
+  return(data.fig2)
+}
+
+
+list.data.fig2 <- map(c(0.2, 0.5, 1, 2, 5, 10, 20), ~ {
+  calc.data.fig2(.x) %>% 
+    dplyr::mutate(LSr_factor = .x)
+})
+
+```
+```{r}
+list.data.fig2[[3]] %>% 
+  left_join(functions.OL_rm %>% 
+              select(1:5, som.decomp, rhizoflux)) %>% 
+  mutate(check = S==som.decomp,
+         diff = som.decomp - S) %>% 
+  select(1:5, som.decomp, S, check, diff) %>% 
+  filter(!check)
+```
+
+
+
+
+```{r}
+summary.fig2.sensi <- 
+  map(list.data.fig2, function(data){
+  data.fig2.log.sc <- 
+    data %>% 
+    filter(Numero != 1 & Numero !=7) %>% 
+    dplyr::mutate(across(c(7:10),
+                         ~ log(.x))) %>% 
+    dplyr::mutate(across(7:10,
+                         ~ scale(.x)))
+  
+  Rh.mod <- lmer(formula = "Rh ~ L + (1|Bloc)", 
+                 data = data.fig2.log.sc[data.fig2.log.sc$Pl == "1",]
+  )
+  
+  S.mod <- lmer(formula = "S ~ Pl + L + (1|Bloc)", 
+                data = data.fig2.log.sc
+  )
+  
+  L.mod <- lmer(formula = "Lit ~ Pl + (1|Bloc)", 
+                data = data.fig2.log.sc[data.fig2.log.sc$L == "1",]
+  )
+  Tot.mod <- lmer(formula = "Total ~ Pl + L + (1|Bloc)", 
+                  data = data.fig2.log.sc
+  )
+  
+  coefs <- summarise_coefs(c(Rh.mod, S.mod, L.mod, Tot.mod)) %>%
+    left_join(sumR2m(c(Rh.mod, S.mod, L.mod, Tot.mod)) %>% 
+                mutate(RespV = as.integer(RespV))
+    ) %>% 
+    mutate(LSr_factor = mean(data$LSr_factor))
+}
+) %>% 
+  bind_rows()
+```
+
+
+```{r data-sensi-A}
+data.fig2.sensi <- 
+  list.data.fig2 %>% 
+  bind_rows() %>% 
+  pivot_longer(cols = 7:9, names_to = "flux") %>% 
+  filter(LSr_factor <=5)
+
+plot.fig2.sensi <- 
+  data.fig2.sensi %>% 
+  mutate(
+    flux = case_when(
+      flux == "S" ~ "SOM cons.",
+      flux == "Rh" ~ "Rhizodeposit cons.",
+      flux == "Lit" ~ "Litter cons."
+      )) %>% 
+  ggplot(aes(x = mod, y = value))+
+  facet_grid(flux~LSr_factor, scale = "free", switch = "y")+
+  geom_boxplot(outliers = F, aes(color = mod, fill = mod)) +
+  geom_point(
+    data =
+      data.fig2.sensi %>% 
+      mutate(flux = case_when(
+        flux == "S" ~ "SOM cons.",
+        flux == "Rh" ~ "Rhizodeposit cons.",
+        flux == "Lit" ~ "Litter cons."
+      ))%>%
+      dplyr::group_by(flux, mod, LSr_factor) %>%
+      dplyr::summarise(mean =mean(value, na.rm =T)),
+    aes(y = mean, color = mod),
+    size = 3
+  )+ 
+  geom_linerange(
+    data =
+      data.fig2.sensi %>% 
+      mutate(flux = case_when(
+        flux == "S" ~ "SOM cons.",
+        flux == "Rh" ~ "Rhizodeposit cons.",
+        flux == "Lit" ~ "Litter cons."
+      ))%>%
+      dplyr::group_by(flux,mod, LSr_factor) %>%
+      dplyr::summarise(mean = mean(value, na.rm =T),
+                sem  = std.error(value, na.rm = T)),
+    aes(y= mean, ymin = if_else(mean-sem*1.96< 0, 0, mean-sem*1.96), ymax = mean+sem*1.96, color = mod),
+    linewidth = 2
+  )+
+  ylim(c(0,NA))+
+  #coord_flip()+
+  scale_fill_manual(values = alpha(paletteMod,0.3))+
+  scale_color_manual(values = paletteMod)+
+  theme_light()+
+  theme(
+    #strip.background = element_rect(fill = "#11111111"),
+    legend.position = "none",
+    strip.placement = "outside",
+    strip.text = element_text(color = "black",
+                              #angle = -90,
+                              size = 20),
+    axis.text = element_text(size = 18),
+    axis.title = element_text(size = 24))+
+  labs(x = "Treatment",
+       y = expression(Flux~(kJ %.% day^{-1} %.% m^{-2})))
+
+```
+
+```{r sensiA, fig.width= 18, fig.height=9}
+
+text.fig2.sensi <- 
+  summary.fig2.sensi  %>% 
+  filter(LSr_factor <=5) %>% 
+  separate_wider_delim(cols = formula, delim = " ~ ", names =c("flux", "formula")) %>% 
+  dplyr::mutate(contains0 = if_else(CI.inf*CI.sup > 0, "no", "yes"),
+         text = paste0(
+                      #"<b>", formula, "</b> <br>",  
+                      "*&beta;", " <sub>", Parameter, "</sub>*", " = ", 
+                      round(Estimate, 2), " ± ", 
+                      round(
+                        if_else(Estimate > 0,
+                                CI.sup - Estimate,
+                                abs(CI.inf) - abs(Estimate)), 2))
+         ) %>% 
+  select(flux, LSr_factor, Parameter, contains0, text, R2m, R2c) %>% 
+  dplyr::left_join(
+    data.fig2.sensi %>%
+      dplyr::group_by(flux, LSr_factor) %>% 
+      filter(!is_outlier(value)) %>%
+      ungroup() %>% 
+      dplyr::group_by(flux) %>% 
+      dplyr::summarise(y = 0.90 * max(value, na.rm =T)) %>% 
+      ungroup()#, 
+    #by = ("flux" = "flux")
+  ) %>% 
+  filter(flux != "Total") %>% 
+  dplyr::group_by(flux, LSr_factor) %>% 
+  dplyr::mutate(
+    y.coef = seq(
+      from = first(y),
+      to   = 0.85 * first(y),
+      length.out = n()
+    ),
+    flux = case_when(
+           flux == "S" ~ "SOM cons.",
+           flux == "Rh" ~ "Rhizodeposit cons.",
+           flux == "Lit" ~ "Litter cons."
+         )
+  )
+
+plot.fig2.sensiA <- 
+  plot.fig2.sensi +
+  geom_richtext(data = 
+                  text.fig2.sensi,
+                aes(x = 4.4, 
+                    y = y.coef,
+                    color = contains0,
+                    label = text),
+                size = 5,
+                label.colour = NA,
+                label.padding = grid::unit(rep(0, 4), "pt"),
+                hjust = 1,
+                vjust = 0.5
+  )+
+  geom_richtext(data = 
+                  text.fig2.sensi,
+                aes(x = 0.5, 
+                    y = y,
+                    label = paste0("*R<sup>2</sup>m* = ", round(R2m, 2), " % <br>",
+                                   "*R<sup>2</sup>c* = ", round(R2c, 2), "%"
+                    )),
+                #parse = TRUE,
+                size = 5,
+                label.colour = NA,
+                #label.padding = grid::unit(rep(0, 4), "pt"),
+                hjust = 0,
+                vjust = 0.5
+  )+
+  #coord_flip()+
+  scale_fill_manual(values = alpha(paletteMod,0.3))+
+  scale_color_manual(values = c(paletteMod, "yes" = "grey", "no" = "black"))+
+  theme_light()+
+  theme(
+    #strip.background = element_rect(fill = "#11111111"),
+    legend.position = "none",
+    strip.placement = "outside",
+    strip.text = element_text(color = "black",
+                              #angle = -90,
+                              size = 20),
+    axis.text = element_text(size = 18),
+    axis.title = element_text(size = 24))+
+  labs(x = "Treatment",
+       y = expression(Flux~(kJ %.% day^{-1} %.% m^{-2})))
+```
+
+
+
+```{r}
+data.fig2.sensi %>%
+      dplyr::group_by(flux,mod, LSr_factor) %>%
+      dplyr::summarise(mean = mean(value, na.rm =T),
+                sem  = std.error(value, na.rm = T),
+                text = paste0(round(mean, 1), " ± ", round(1.96*sem, 1))
+                ) %>% 
+  drop_na()
+```
+
+```{r data-fig2-sensi-B}
+data.fig2.sensiB <- 
+  data.fig2.sensi %>% 
+  filter(mod == "Pl+L" & LSr_factor == 20 |
+           mod %in% c("Pl", "C") & LSr_factor == 1 |
+           mod %in% c("L") & LSr_factor == 10) 
+
+data.fig2.log.scB <- 
+  data.fig2.sensiB %>% 
+  filter(Numero != 1 & Numero !=7) %>% 
+  dplyr::mutate(value = log(value)) %>% 
+  group_by(flux) %>% 
+  dplyr::mutate(value = scale(value)) %>% 
+  #filter(!is_extreme(value))%>% 
+  ungroup() %>% 
+  pivot_wider(names_from = flux, values_from = value)
+
+Rh.mod <- lmer(formula = "Rh ~ L + (1|Bloc)", 
+               data = data.fig2.log.scB[data.fig2.log.scB$Pl == "1",]
+)
+
+S.mod <- lmer(formula = "S ~ Pl + L + (1|Bloc)", 
+              data = data.fig2.log.scB
+)
+
+L.mod <- lmer(formula = "Lit ~ Pl + (1|Bloc)", 
+              data = data.fig2.log.scB[data.fig2.log.scB$L == "1",]
+)
+
+coefsB <- summarise_coefs(c(Rh.mod, S.mod, L.mod)) %>%
+  left_join(sumR2m(c(Rh.mod, S.mod, L.mod)) %>% 
+              mutate(RespV = as.integer(RespV))
+  )
+
+text.sensi.B <- 
+  coefsB %>% 
+  separate_wider_delim(cols = formula, delim = " ~ ", names =c("flux", "formula")) %>% 
+  dplyr::mutate(contains0 = if_else(CI.inf*CI.sup > 0, "no", "yes"),
+         text = paste0(
+                      #"<b>", formula, "</b> <br>",  
+                      "*&beta;", " <sub>", Parameter, "</sub>*", " = ", 
+                      round(Estimate, 2), " ± ", 
+                      round(
+                        if_else(Estimate > 0,
+                                CI.sup - Estimate,
+                                abs(CI.inf) - abs(Estimate)), 2))
+         ) %>% 
+  select(flux, Parameter, contains0, text, R2m, R2c) %>% 
+  dplyr::left_join(
+    data.fig2.sensiB %>%
+      dplyr::group_by(flux) %>% 
+      filter(!is_outlier(value)) %>%
+      ungroup() %>% 
+      dplyr::group_by(flux) %>% 
+      dplyr::summarise(y = 0.90 * max(value, na.rm =T)) %>% 
+      ungroup(), 
+    by = ("flux" = "flux")
+  ) %>% 
+  filter(flux != "Total") %>% 
+  mutate(flux = case_when(
+           flux == "S" ~ "SOM cons.",
+           flux == "Rh" ~ "Rhizodeposit cons.",
+           flux == "Lit" ~ "Litter cons."
+         )) %>% 
+  dplyr::group_by(flux) %>% 
+  dplyr::mutate(
+    y.coef = seq(
+      from = first(y),
+      to   = 0.85 * first(y),
+      length.out = n()
+    )
+  )
+
+
+data.fig2.log.scB[data.fig2.log.scB$Pl == "1",] %>% select(NumeroBloc, mod, S, Rh, Lit, LSr_factor)
+list.data.fig2[[5]] %>% filter(Pl == "1") %>% select(NumeroBloc, mod, S, Rh, Lit, LSr_factor)
+```
+
+```{r fig2-sensi-B, fig.width= 6, fig.height=9}
+plot.fig2.sensiB <- 
+  data.fig2.sensiB %>% 
+  mutate(flux = case_when(
+           flux == "S" ~ "SOM cons.",
+           flux == "Rh" ~ "Rhizodeposit cons.",
+           flux == "Lit" ~ "Litter cons."
+         )) %>% 
+  ggplot(aes(x=mod, y = value))+
+  facet_grid(flux ~., scales = "free", switch = "y")+
+  geom_boxplot(outliers = F, aes(color = mod, fill = mod)) +
+  geom_point(
+    data =
+      data.fig2.sensiB %>% 
+      mutate(flux = case_when(
+        flux == "S" ~ "SOM cons.",
+        flux == "Rh" ~ "Rhizodeposit cons.",
+        flux == "Lit" ~ "Litter cons."
+      ))%>%
+      dplyr::group_by(flux, mod, LSr_factor) %>%
+      dplyr::summarise(mean =mean(value, na.rm =T)),
+    aes(y = mean, color = mod),
+    size = 3
+  )+ 
+  geom_linerange(
+    data =
+      data.fig2.sensiB %>% 
+      mutate(flux = case_when(
+        flux == "S" ~ "SOM cons.",
+        flux == "Rh" ~ "Rhizodeposit cons.",
+        flux == "Lit" ~ "Litter cons."
+      ))%>%
+      dplyr::group_by(flux,mod, LSr_factor) %>%
+      dplyr::summarise(mean = mean(value, na.rm =T),
+                sem  = std.error(value, na.rm = T)),
+    aes(y= mean, ymin = if_else(mean-sem*1.96< 0, 0, mean-sem*1.96), ymax = mean+sem*1.96, color = mod),
+    linewidth = 2
+  )+
+  ylim(c(0,NA))+
+  geom_richtext(data = text.sensi.B,
+                aes(x = 4.4,
+                    y = y.coef*1.1,
+                    color = contains0,
+                    label = text),
+                size = 5,
+                label.colour = NA,
+                label.padding = grid::unit(rep(0, 4), "pt"),
+                hjust = 1,
+                vjust = 0.5
+  )+
+  geom_richtext(data =
+                  text.fig2.sensi,
+                aes(x = 0.5,
+                    y = 0.1*y,
+                    label = paste0("*R<sup>2</sup>m* = ", round(R2m, 2), " % <br>",
+                                   "*R<sup>2</sup>c* = ", round(R2c, 2), "%"
+                    )),
+                #parse = TRUE,
+                size = 5,
+                label.colour = NA,
+                #label.padding = grid::unit(rep(0, 4), "pt"),
+                hjust = 0,
+                vjust = 0.5
+  )+
+  scale_fill_manual(values = alpha(paletteMod,0.3))+
+  scale_color_manual(values = c(paletteMod, "yes" = "grey", "no" = "black"))+
+  theme_light()+
+  theme(
+    #strip.background = element_rect(fill = "#11111111"),
+    legend.position = "none",
+    strip.placement = "outside",
+    strip.text = element_text(color = "black",
+                              #angle = -90,
+                              size = 20),
+    axis.text = element_text(size = 18),
+    axis.title = element_text(size = 24))+
+  labs(x = "Treatment",
+       y = expression(Flux~(kJ %.% day^{-1} %.% m^{-2}))
+       )
+
+plot.fig2.sensiB
+```
+
+```{r fig.width=23, fig.height=9}
+plot_grid(
+  plot.fig2.sensiA,
+  plot.fig2.sensiB,
+  rel_widths = c(18,5),
+  align = c("hv"),
+  axis = c("btlr"), 
+  labels = "AUTO"
+)
+
+
+ggsave("Figures/FigSM2.5_SensiFLS.png")
+```
+
+
+# Sensi of rhizo to AMF fluxes
+
+```{r}
+complete_fluxes %>% 
+  filter(Numero != 1 & Numero !=7) %>% 
+  filter(node_type_to == "microbes" & To != "F.amf")  %>% 
+  dplyr::mutate(flux_type = case_when(
+    flux_type == "som.decomp" ~ "SOM decomp.",
+    flux_type == "litter.decomp" ~ "Litter decomp.",
+    flux_type == "rhizoflux" ~ "Rhizoflux"
+  )) %>% 
+  select(- c(trophic_level_from, node_type_from)) %>% 
+  pivot_wider(names_from = To, values_from = Flux) %>% 
+  rowwise() %>% 
+  dplyr::mutate(bact = sum(c(B.Gpos,B.Gneg)),
+                fung = sum(F.s)
+  ) %>% 
+  ungroup() %>% 
+  select(1:7, bact, fung) %>% 
+  dplyr::mutate(fb_ratio = fung/bact)  %>% 
+  dplyr::mutate(
+    Sp = if_else(is.na(Sp), "C", Sp),
+    Pl = if_else( 
+      condition = str_detect(pattern = "P", string = mod), 
+      true = "1", false= "0"),
+    L = if_else( 
+      str_detect(pattern = "L", string = mod), 
+      "1", "0"),
+    .after = "mod"
+  ) %>% 
+  select(-bact, -fung) %>% 
+  group_by(mod, gf, flux_type) %>% 
+  dplyr::mutate(fb_ratio = if_else(is_extreme(fb_ratio), 
+                                   NA, fb_ratio)) %>% 
+  drop_na(fb_ratio) %>% 
+  ungroup() %>% 
+  dplyr::group_by(mod, flux_type) %>% 
+  dplyr::summarise(fb_ratio = paste0(round(mean(fb_ratio),2),
+                                    " ± ",
+                                    round(std.error(fb_ratio)*1.96, 2))
+                   )
+
+complete_fluxes %>% 
+  filter(Numero != 1 & Numero !=7) %>% 
+  filter(node_type_to == "microbes")  %>% 
+  dplyr::mutate(flux_type = case_when(
+    flux_type == "som.decomp" ~ "SOM decomp.",
+    flux_type == "litter.decomp" ~ "Litter decomp.",
+    flux_type == "rhizoflux" ~ "Rhizoflux"
+  )) %>% 
+  select(- c(trophic_level_from, node_type_from)) %>% 
+  pivot_wider(names_from = To, values_from = Flux) %>% 
+  rowwise() %>% 
+  dplyr::mutate(bact = sum(c(B.Gpos,B.Gneg)),
+                fung = sum(F.s, F.amf)
+  ) %>% 
+  ungroup() %>% 
+  select(1:7, bact, fung) %>% 
+  dplyr::group_by(Numero, Bloc, Sp, mod, gf) %>% 
+  dplyr::summarise(bact = sum(bact),
+            fung = sum(fung)) %>% 
+  dplyr::mutate(fb_ratio = fung/bact)  %>% 
+  dplyr::ungroup() %>% 
+  dplyr::mutate(
+    Sp = if_else(is.na(Sp), "C", Sp),
+    Pl = if_else( 
+      condition = str_detect(pattern = "P", string = mod), 
+      true = "1", false= "0"),
+    L = if_else( 
+      str_detect(pattern = "L", string = mod), 
+      "1", "0"),
+    .after = "mod"
+  ) %>% 
+  select(-bact, -fung) %>% 
+  dplyr::group_by(mod, gf) %>% 
+  dplyr::mutate(fb_ratio = if_else(is_extreme(fb_ratio), 
+                                   NA, fb_ratio)) %>% 
+  drop_na(fb_ratio) %>% 
+  ungroup() %>% 
+  dplyr::group_by(mod) %>% 
+  dplyr::summarise(fb_ratio = paste0(round(mean(fb_ratio),2),
+                                    " ± ",
+                                    round(std.error(fb_ratio)*1.96, 2))
+                   )
+
+complete_fluxes %>% 
+  filter(Numero != 1 & Numero !=7) %>% 
+  filter(flux_type == "rhizoflux") %>% 
+  select(1:5, To, Flux) %>% 
+  dplyr::group_by(Numero, Bloc) %>% 
+  dplyr::mutate(PropToAMF = if_else(To == "F.amf", Flux/sum(Flux), NA)) %>% 
+  ungroup() %>% 
+  drop_na() %>% 
+  #dplyr::group_by(mod) %>% 
+  dplyr::summarise(PropToAMF = paste0(round(mean(PropToAMF),2),
+                                    " ± ",
+                                    round(std.error(PropToAMF)*1.96, 2)))
+
+
+complete_fluxes %>% 
+  filter(node_type_to == "microbes" & mod %in% c("Pl", "Pl+L"))  %>% 
+  select(1:5, From, To, Flux) %>% 
+  mutate(type_to = if_else(To %in% c("B.Gpos", "B.Gneg"), "bact", "fung")) %>% 
+  group_by(Numero, Bloc, type_to) %>% 
+  mutate(tot = sum(Flux)) %>% 
+  dplyr::group_by(Numero, Bloc, type_to, From) %>% 
+  mutate(incomin_tot = sum(Flux)) %>% 
+  ungroup() %>% 
+  select(Numero, Bloc, From, type_to, incomin_tot, tot) %>% 
+  unique() %>% 
+  mutate(prop_inc = incomin_tot/tot) %>% 
+  group_by(type_to, From) %>% 
+  dplyr::summarise(prop_inc = paste0(round(mean(prop_inc, na.rm=T),2),
+                                    " ± ",
+                                    round(std.error(prop_inc, na.rm=T)*1.96, 2)))
+
+complete_fluxes %>% 
+  filter(node_type_to == "microbes" & mod %in% c("Pl", "Pl+L"))  %>% 
+  select(1:5, From, To, Flux) %>% 
+  mutate(type_to = if_else(To %in% c("B.Gpos", "B.Gneg"), "bact", "fung")) %>% 
+  group_by(Numero, Bloc, type_to) %>% 
+  mutate(tot = sum(Flux)) %>% 
+  dplyr::group_by(Numero, Bloc, type_to, From,To) %>% 
+  mutate(incomin_tot = sum(Flux)) %>% 
+  ungroup() %>% 
+  select(Numero, Bloc, From, type_to, incomin_tot, tot, To) %>% 
+  unique() %>% 
+  mutate(prop_inc = incomin_tot/tot) %>% 
+  group_by(type_to, From, To) %>% 
+  dplyr::summarise(prop_inc = paste0(round(mean(prop_inc, na.rm=T),2),
+                                    " ± ",
+                                    round(std.error(prop_inc, na.rm=T)*1.96, 2)))
+```
+
+
+
+## Inputs
+
+
+```{r}
+full.M.MN.kJ.d %>% 
+  filter(Group %in% microbes) %>% 
+  select(- Biomass, - ea) %>% 
+  left_join(data.calc %>% 
+              select(1, 2, LSr, RhSr) %>% 
+              group_by(Group) %>% 
+              mutate(
+                RhSr = if_else(is.na(RhSr), median(RhSr, na.rm = T), RhSr)
+              )
+            )
+
+
+data.calc %>% 
+  select(1:5, LSr, RhSr, RhLr) %>% 
+  pivot_longer(cols = c(LSr, RhSr, RhLr), names_to = "var") %>% 
+  dplyr::group_by(Group, mod, var) %>% 
+  dplyr::summarise(median = median(value, na.rm =T),
+                   mean = mean(value, na.rm = T),
+                   CV = sd(value, na.rm = T)/mean *100) %>% 
+  drop_na()
+```
+
+
+
+
+
+
+
+

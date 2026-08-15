@@ -1,0 +1,1250 @@
+---
+  title: "Models"
+output: html_document
+date: "2025-10-27"
+---
+  
+  ```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=FALSE, include = FALSE, message = FALSE, warning = FALSE)
+```
+
+```{r packages}
+library(plyr)
+
+
+library(rstatix)
+
+library(lme4)
+library(lmerTest)
+library(nlme)
+library(performance)
+
+library(car)
+library(purrr)
+library(MuMIn)
+library(tidyverse)
+library(redres)
+
+library(broom)
+library(broom.mixed)
+library(effectsize)
+
+library(ggfortify)
+library(cowplot)
+
+library(deeptime)
+
+library(kableExtra)
+
+library(tidyverse)
+
+library(PCAmixdata)
+library(ggforce)
+library(ggrepel)
+```
+
+
+```{r load}
+load("object/full.results.Rdata")
+```
+
+```{r source}
+source(file = "FUNS_models_TIDY1.R")
+```
+
+
+
+```{r}
+functions.OL_rm <-
+  functions %>% 
+  dplyr::mutate(across(where(is.numeric),
+                       ~ if_else(is_extreme(.x), 
+                                 NaN, .x))
+  ) %>% 
+  mutate(
+    predation = if_else(predation == 0, NA, predation),
+    predation = if_else(is.na(predation), min(predation, na.rm = T)/2, predation),
+    predation = if_else(is.nan(predation), NA, predation),
+    herbivory = if_else(herbivory == 0, NA, herbivory),
+    herbivory = if_else(herbivory == 0 & mod %in% c("Pl", "Pl+L"), min(herbivory, na.rm = T)/2, herbivory),
+    herbivory = if_else(mod %in% c("L", "C"), 0, herbivory))
+
+```
+
+```{r data}
+data.model <- 
+  functions.OL_rm  %>% 
+  dplyr::mutate(L = as.factor(if_else(mod == "Pl+L" | mod == "L",
+                                      1, 0)),
+                Pl = as.factor(if_else(mod == "Pl" | mod == "Pl+L",
+                                       1, 0)),
+                Sp = if_else(is.na(Sp), 
+                             "T", Sp),
+                gf = if_else(is.na(gf), 
+                             "T", gf)#,
+  ) %>% 
+  select(Bloc, Numero, Sp, Pl, L, everything()) %>% 
+  dplyr::mutate(Sp = as.ordered(Sp),
+                Sp = ordered(Sp, levels=c("T", "N.s.", "F.o.", "D.g.", "A.o.", "H.l.",
+                                          "C.r.", "G.v.", "P.l.", "C.n.", "R.a.", 
+                                          "M.a.", "T.p.", "L.c.", "M.s.", "T.r.")),
+                gf = as.ordered(gf),
+                gf = ordered(gf, levels = c("Temoins", "Forb", "Grass", "Legumes"))) %>% 
+  dplyr::mutate(total = if_else(paste0(Numero, Bloc) == "6A", NA, total),
+                som.decomp = if_else(paste0(Numero, Bloc) == "6A", NA, som.decomp))  %>%
+  dplyr::mutate(litter.decomp = if_else(litter.decomp == 0, NA, litter.decomp), 
+                rhizoflux = if_else(rhizoflux == 0, NA, rhizoflux),
+                herbivory = if_else(herbivory == 0, NA, herbivory)) %>% 
+  select(- decomposition, - microbivory)
+
+data.strat <- 
+  read_csv2("data_tidy/DataPES.csv") %>% 
+  left_join(read_csv2("data_tidy/DataPhysio.csv")) %>% 
+  select(1:5, PerColAMF, R_resp, PS, AGR) %>% 
+  dplyr::mutate(Numero = as.character(Numero)) %>%
+  select(-mod) %>% 
+  left_join(data.model %>% 
+              select(-c(Pl, gf))
+  ) %>% 
+  dplyr::mutate(nod = if_else(gf=="Leg", "1", "0")) %>% 
+  select(1:5, L, nod, everything()) %>% 
+  dplyr::mutate(across(where(is.numeric),
+                       ~ if_else(is_extreme(.x), 
+                                 NA, .x))
+  )
+
+data.lit.prop <- 
+  read_csv2("data_tidy/DataLitterTraits.csv") %>% 
+  group_by(Sp, Type) %>% 
+  dplyr::summarise(across(where(is.numeric), 
+                          ~ mean(.x, na.rm=T))) %>% 
+  ungroup() %>%
+  left_join(
+    tibble(Type = c("PA", "PS"),
+           frac = c(1.5/2.2, 0.7/2.2)) # weighted average between shoot (PA) and root (PS) litter
+  ) %>% 
+  dplyr::mutate(across(where(is.numeric),
+                       ~.x * frac)) %>% 
+  group_by(Sp) %>% 
+  dplyr::summarise(across(where(is.numeric),
+                          ~ sum(.x)
+  )
+  ) %>% 
+  select(-frac) %>% 
+  dplyr::mutate(CNratio = CperMS/NperMS,
+                ligNratio = lignines/NperMS,
+                NPratio = NperMS/P,
+                celluloses = hemi.cellulose+cellulose) %>% 
+  dplyr::mutate(across(where(is.numeric),
+                       ~ if_else(is_extreme(.x), 
+                                 NA, .x))
+  )
+
+data.model.lit <- 
+  data.model %>% 
+  filter(L==1) %>%
+  left_join(data.lit.prop)
+  
+  
+response_vars.C <- c("bacterivory","predation","total","fungivory","som.decomp")
+response_vars.P <- c("herbivory", "rhizoflux")
+response_vars.L <- c("litter.decomp")
+
+
+read_csv2("data_tidy/DataPES.csv") %>% 
+  left_join(read_csv2("data_tidy/DataPhysio.csv")) %>% 
+  arrange(as.numeric(Numero), Bloc)
+```
+
+
+```{r pca-rot}
+
+data.lit.prop %>% 
+  select(-celluloses) %>% 
+  left_join(read_csv2("SFW_database/NumeroSpModGf.csv") %>% 
+              select(Sp, gf) %>% 
+              unique())
+
+PCA.rot <- PCAmix(
+  X.quanti = as.matrix(data.lit.prop %>% 
+                         select(-celluloses, - soluble, - Sp)
+  ) ,
+  ndim = 15,
+  graph = T
+) %>% 
+  PCArot(., dim = 2, graph = T)
+
+PCA.rot$ind
+
+plot_grid(
+  PCA.rot$quanti$coord %>% 
+    as_tibble(rownames="var") %>% 
+    left_join(read_csv2("SFW_database/DicoLitterProp.csv"),
+            by = join_by(var == litter.prop)) %>% 
+    ggplot()+
+    geom_hline(yintercept = 0, linetype = "dashed")+
+    geom_vline(xintercept = 0, linetype = "dashed")+
+    geom_circle(aes(x0 = 0, y0 = 0, r = 1), color = "grey")+
+    geom_segment(x = 0, y = 0, aes(xend = dim1.rot, yend = dim2.rot), arrow = arrow(length = unit(0.15, "cm")))+
+    geom_text_repel(aes(label= proper.name, x = dim1.rot, y = dim2.rot), check_overlap = F)+
+    labs(x = paste0("Dim1 - rotated", " (", round(PCA.rot$eig[1,2], 1),"%)" ),
+         y = paste0("Dim2 - rotated", " (", round(PCA.rot$eig[2,2], 1),"%)" )
+         )+
+    theme_light()+
+    theme(aspect.ratio = 1),
+  data.lit.prop %>% 
+    select(Sp) %>% 
+    bind_cols(as_tibble(PCA.rot$ind$coord)) %>% 
+    ggplot(aes(x = dim1.rot, y = dim2.rot))+
+    labs(x = paste0("Dim1 - rotated", " (", round(PCA.rot$eig[1,2], 1),"%)" ),
+         y = paste0("Dim2 - rotated", " (", round(PCA.rot$eig[2,2], 1),"%)" )
+         )+
+    geom_text(aes(color = Sp, label = Sp))+
+    scale_color_manual(values = paletteSp)+
+    theme_light()+
+    theme(aspect.ratio = 1,
+          legend.position = "none"),
+  labels = "AUTO",
+  align = "hv",
+  axis = "tblr"
+)
+
+ggsave("Figures/FigSM_PCA_rot_litter.svg")
+
+
+```
+
+# Models treatment {.tabset}
+
+
+## Log-transformed Data, scaled
+
+```{r table.model.trt}
+
+
+data.model.log.sc <- 
+  data.model %>% 
+  filter(Numero != 1 & Numero !=7) %>% 
+  dplyr::mutate(across(c(8:last_col()),
+                       ~ log(.x))) %>% 
+  dplyr::mutate(across(8:last_col(),
+                       ~ scale(.x)))
+
+models.C.log.sc <- 
+  run_models1(data.model.log.sc,
+              "~ Pl + L + (1 | Bloc) + (1 | Sp)",
+              response_vars.C)
+
+models.P.log.sc <- 
+  run_models1(data.model.log.sc %>% 
+                filter(Pl == 1) ,
+              "~ L + (1 | Bloc) + (1 | Sp)",
+              response_vars.P)
+
+models.L.log.sc <- 
+  run_models1(data.model.log.sc %>% 
+                filter(L == 1),
+              "~ Pl + (1 | Bloc) + (1 | Sp)",
+              response_vars.L) 
+
+data.model.log.sc %>% 
+  dplyr::mutate(across(where(is.numeric),
+                       ~ if_else(is_extreme(.x), 
+                                 NA, .x))
+  ) %>%
+  dplyr::summarise(across(everything(),  ~sum(is.na(.))))
+
+
+models.log.sc <- c(models.L.log.sc, models.P.log.sc, models.C.log.sc)
+rm(models.L.log.sc, models.P.log.sc, models.C.log.sc)
+table.models.log.sc <- summarise_coefs(models.log.sc)
+
+table.models.log.sc %>% 
+  filter(CI.inf * CI.sup > 0)
+```
+
+```{r include = T, fig.height=10, fig.width=6}
+vis_coefs(table.models.log.sc, models.log.sc, my.scales = "fixed")
+#vis_coefs(table.models.log.sc)
+```
+
+```{r vis-check}
+# 
+# lapply(names(models.log.sc), function(name) {
+#   diag_plot(models.log.sc[[name]], name, "log-transf data scaled")
+# })
+```
+
+
+# Models strat 
+
+## Log-transformed Data, scaled
+
+```{r data-strat-log-sc}
+
+data.strat.log.sc <- 
+  data.strat %>%
+  select(1:4, mod, L, nod, everything()) %>% 
+  dplyr::mutate(PerColAMF = asin(PerColAMF),
+                across(c(9:last_col()),
+                       ~ log(.x))) %>% 
+  dplyr::mutate(across(8:last_col(),
+                       ~ scale(.x)))
+
+```
+
+```{r lm-form-strat}
+
+lm.form.strat.L <- 
+  lapply(response_vars.L, 
+         function(RV) {
+           str_c(RV, "~ PerColAMF + AGR + (1|Bloc)") # formula f
+         }
+  ) 
+
+lm.form.strat.CP <- 
+  lapply(c(response_vars.C, response_vars.P), 
+         function(RV) {
+           str_c(RV, "~ L + PerColAMF + AGR + (1|Bloc)")
+         }
+  )
+```
+
+### Fixed structure
+
+```{r models.strat}
+# Var control and plants -----------------------------------------
+models.strat.CP <- 
+  purrr::map(lm.form.strat.CP, ~ {
+    print(.x)
+    data.subset <- 
+      data.strat.log.sc %>% 
+      select(
+        colnames(data.strat.log.sc)[str_detect(
+          pattern = colnames(data.strat.log.sc), 
+          string = .x
+        ) == T]
+      ) %>% 
+      drop_na()
+    
+    # Fit the model using lmer
+    model <- lmer(as.formula(.x), 
+                  data = data.subset, na.action = "na.fail",
+                  REML = TRUE
+    ) 
+  })
+
+# Var litter -----------------------------------------
+models.strat.L <- 
+  purrr::map(lm.form.strat.L, ~ {
+    #print(.x)
+    data.subset <- 
+      data.strat.log.sc %>% 
+      filter(L==1) %>% 
+      select(
+        colnames(data.strat.log.sc)[str_detect(
+          pattern = colnames(data.strat.log.sc), 
+          string = .x
+        ) == T]
+      ) %>% 
+      drop_na()
+    
+    # Fit the model using lmer
+    model <- lmer(as.formula(.x), 
+                  data = data.subset, na.action = "na.fail",
+                  REML = TRUE
+    ) 
+  }) 
+  
+
+models.strat <- c(models.strat.CP, models.strat.L)
+names(models.strat) <- c(lm.form.strat.CP, lm.form.strat.L)
+```
+
+
+
+```{r sum-coefs-strat}
+
+# Var control and plants -----------------------------------------
+sum.coefs.strat.CP <- 
+  purrr::map(lm.form.strat.CP, ~ {
+    #print(.x)
+    data.subset <- 
+      data.strat.log.sc %>% 
+      select(
+        colnames(data.strat.log.sc)[str_detect(
+          pattern = colnames(data.strat.log.sc), 
+          string = .x
+        ) == T]
+      ) %>% 
+      drop_na()
+    
+    # Fit the model using lmer
+    model <- lmer(as.formula(.x), 
+                  data = data.subset, na.action = "na.fail",
+                  REML = TRUE
+    ) 
+    coef(summary(model)) %>%
+      as_tibble(rownames = "Parameter")  %>%
+      left_join(
+        confint(model)%>%
+          as_tibble(rownames = "Parameter")
+      ) %>%
+      add_column(Formula = .x,
+                 .before =1) %>%
+      separate_wider_delim(cols = Formula, delim = "~", names = c("RespV", "Formula")) %>% 
+      dplyr::rename(CI.inf = `2.5 %`,
+                    CI.sup = `97.5 %`,
+                    p = `Pr(>|t|)`)
+  }) %>% 
+  bind_rows()
+
+# Var litter -----------------------------------------
+sum.coefs.strat.L <- 
+  purrr::map(lm.form.strat.L, ~ {
+    #print(.x)
+    data.subset <- 
+      data.strat.log.sc %>% 
+      filter(L==1) %>% 
+      select(
+        colnames(data.strat.log.sc)[str_detect(
+          pattern = colnames(data.strat.log.sc), 
+          string = .x
+        ) == T]
+      ) %>% 
+      drop_na()
+    
+    # Fit the model using lmer
+    model <- lmer(as.formula(.x), 
+                  data = data.subset, na.action = "na.fail",
+                  REML = TRUE
+    ) 
+    coef(summary(model)) %>%
+      as_tibble(rownames = "Parameter")  %>%
+      left_join(
+        confint(model)%>%
+          as_tibble(rownames = "Parameter")
+      ) %>%
+      add_column(Formula = .x,
+                 .before =1) %>%
+      separate_wider_delim(cols = Formula, delim = "~", names = c("RespV", "Formula")) %>% 
+      dplyr::rename(CI.inf = `2.5 %`,
+                    CI.sup = `97.5 %`,
+                    p = `Pr(>|t|)`)
+  }) %>% 
+  bind_rows()
+
+sum.coefs.strat <- 
+  sum.coefs.strat.CP %>% 
+  bind_rows(sum.coefs.strat.L) %>% 
+  mutate(contains0 = if_else(CI.inf * CI.sup > 0, "yes", "no"),
+         signif = case_when(
+           p < 0.001 ~ "***",
+           p < 0.01 ~ "**",
+           p < 0.05 ~ "*", 
+           p < 0.1 ~ "·"
+         ))
+```
+
+
+```{r plot-strat}
+
+sum.coefs.strat %>%
+  filter(Parameter != "(Intercept)") %>% 
+  ggplot(aes(x = Parameter, y = Estimate))+
+  facet_grid("Biomass"~RespV)+
+  geom_hline(yintercept = 0, linetype = "dashed")+
+  geom_text(aes(y = Estimate, 
+                label=signif, 
+                alpha = contains0),
+            nudge_x = .1)+
+  geom_pointrange(
+    aes(
+      alpha = contains0,
+      ymin = CI.inf, ymax = CI.sup)
+  )+
+  #scale_color_manual(values = palette_traits)+
+  scale_alpha_discrete(range = c(0.3, 1)) +
+  #scale_color_manual(values= c("yes" = "grey", "no" = "black"))+
+  theme_light()+
+  coord_flip()
+```
+
+
+
+# Models litter properties {.tabset}
+
+
+
+```{r data.lit.log.sc}
+
+data.lit.log.sc <-
+  data.model.lit %>%
+  dplyr::mutate(rhizoflux = if_else(rhizoflux == 0, NA, rhizoflux),
+                herbivory = if_else(herbivory == 0, NA, herbivory)) %>%
+  dplyr::mutate(across(c(celluloses, cellulose, hemi.cellulose, lignines, soluble, cendres),
+                       ~asin(.x)),
+                across(c(response_vars.L, 
+                         response_vars.P, 
+                         response_vars.C, 
+                         20:last_col(), - celluloses),
+                       ~ log(.x)),
+                across(8:last_col(),
+                       ~ scale(.x))) %>% 
+  left_join(data.lit.prop %>% 
+              select(Sp) %>% 
+              bind_cols(as_tibble(PCA.rot$ind$coord)))
+
+
+```
+
+
+
+```{r lm-form-lit}
+
+lm.form.lit.P <- 
+  lapply(response_vars.P, 
+         function(RV) {
+           str_c(RV, "~  dim1.rot + dim2.rot + (1|Bloc)") # formula f
+         }
+  ) 
+
+lm.form.lit.CL <- 
+  lapply(c(response_vars.C, response_vars.L), 
+         function(RV) {
+           str_c(RV, "~ Pl + dim1.rot + dim2.rot + (1|Bloc)")
+         }
+  )
+
+lm.form.lit.CL %>% unlist(recursive =F)
+```
+
+### Fixed structure
+
+```{r sum-coefs-lit}
+
+# Var control and litter -----------------------------------------
+models.lit.CL <- 
+  purrr::map(lm.form.lit.CL %>% unlist(recursive =F), ~ {
+    print(.x)
+    data.subset <- 
+      data.lit.log.sc %>% 
+      select(
+        colnames(data.lit.log.sc)[str_detect(
+          pattern = colnames(data.lit.log.sc), 
+          string = .x
+        ) == T]
+      ) %>% 
+      drop_na()
+    print(data.subset)
+    # Fit the model using lmer
+    model <- lmer(as.formula(.x), 
+                  data = data.subset, na.action = "na.fail",
+                  REML = TRUE
+    ) 
+    
+  }) 
+# Var plants -----------------------------------------
+models.lit.P <- 
+  purrr::map(lm.form.lit.P %>% unlist(recursive =F), ~ {
+    #print(.x)
+    data.subset <- 
+      data.lit.log.sc %>% 
+      filter(Pl==1) %>% 
+      select(
+        colnames(data.lit.log.sc)[str_detect(
+          pattern = colnames(data.lit.log.sc), 
+          string = .x
+        ) == T]
+      ) %>% 
+      drop_na()
+    
+    # Fit the model using lmer
+    model <- lmer(as.formula(.x), 
+                  data = data.subset, na.action = "na.fail",
+                  REML = TRUE
+    )
+  }) 
+
+models.lit <- c(models.lit.CL, models.lit.P)
+names(models.lit) <- c(lm.form.lit.CL %>% unlist(recursive =F), lm.form.lit.P %>% unlist(recursive =F))
+
+```
+
+
+
+```{r sum-coefs-lit}
+
+# Var control and litter -----------------------------------------
+sum.coefs.lit.CL <- 
+  purrr::map(lm.form.lit.CL %>% unlist(recursive =F), ~ {
+    #print(.x)
+    data.subset <- 
+      data.lit.log.sc %>% 
+      select(
+        colnames(data.lit.log.sc)[str_detect(
+          pattern = colnames(data.lit.log.sc), 
+          string = .x
+        ) == T]
+      ) %>% 
+      drop_na()
+    
+    # Fit the model using lmer
+    model <- lmer(as.formula(.x), 
+                  data = data.subset, na.action = "na.fail",
+                  REML = TRUE
+    ) 
+    coef(summary(model)) %>%
+      as_tibble(rownames = "Parameter")  %>%
+      left_join(
+        confint(model)%>%
+          as_tibble(rownames = "Parameter")
+      ) %>%
+      add_column(Formula = .x,
+                 .before =1) %>%
+      separate_wider_delim(cols = Formula, delim = "~", names = c("RespV", "Formula")) %>% 
+      dplyr::rename(CI.inf = `2.5 %`,
+                    CI.sup = `97.5 %`,
+                    p = `Pr(>|t|)`)
+  }) %>% 
+  bind_rows()
+
+# Var plants -----------------------------------------
+sum.coefs.lit.P <- 
+  purrr::map(lm.form.lit.P %>% unlist(recursive =F), ~ {
+    #print(.x)
+    data.subset <- 
+      data.lit.log.sc %>% 
+      filter(Pl==1) %>% 
+      select(
+        colnames(data.lit.log.sc)[str_detect(
+          pattern = colnames(data.lit.log.sc), 
+          string = .x
+        ) == T]
+      ) %>% 
+      drop_na()
+    
+    # Fit the model using lmer
+    model <- lmer(as.formula(.x), 
+                  data = data.subset, na.action = "na.fail",
+                  REML = TRUE
+    )
+    
+    coef(summary(model)) %>%
+      as_tibble(rownames = "Parameter")  %>%
+      left_join(
+        confint(model)%>%
+          as_tibble(rownames = "Parameter")
+      ) %>%
+      add_column(Formula = .x,
+                 .before =1) %>%
+      separate_wider_delim(cols = Formula, delim = "~", names = c("RespV", "Formula")) %>% 
+      dplyr::rename(CI.inf = `2.5 %`,
+                    CI.sup = `97.5 %`,
+                    p = `Pr(>|t|)`)
+  }) %>% 
+  bind_rows()
+
+
+sum.coefs.lit <- 
+  sum.coefs.lit.CL %>% 
+  bind_rows(sum.coefs.lit.P) %>% 
+  mutate(contains0 = if_else(CI.inf * CI.sup > 0, "yes", "no"),
+         signif = case_when(
+           p < 0.001 ~ "***",
+           p < 0.01 ~ "**",
+           p < 0.05 ~ "*", 
+           p < 0.1 ~ "·"
+         )) 
+```
+
+
+
+```{r plot-lit}
+sum.coefs.lit %>%
+  filter(Parameter != "(Intercept)") %>% 
+  ggplot(aes(x = Parameter, y = Estimate))+
+  facet_grid("Flux"~RespV)+
+  geom_hline(yintercept = 0, linetype = "dashed")+
+  geom_text(aes(y = Estimate, 
+                label=signif, 
+                alpha = contains0),
+            nudge_x = .1)+
+  geom_pointrange(
+    aes(
+      alpha = contains0,
+      ymin = CI.inf, ymax = CI.sup)
+  )+
+  #scale_color_manual(values = palette_traits)+
+  scale_alpha_discrete(range = c(0.3, 1)) +
+  #scale_color_manual(values= c("yes" = "grey", "no" = "black"))+
+  theme_light()+
+  coord_flip()
+```
+
+
+
+# Modèles f:b ratios
+
+## -ory
+
+```{r}
+data.fb.vory <- 
+  functions.OL_rm %>% 
+  filter(Numero != 1 & Numero !=7) %>% 
+  
+  dplyr::mutate(across(where(is.numeric),
+                       ~if_else(.x == 0,
+                                NA,
+                                .x))) %>% 
+  dplyr::mutate(f_b_ratio = fungivory/bacterivory,
+                Sp = if_else(is.na(Sp), "C", Sp))  %>% 
+  select(1:5, f_b_ratio) %>% 
+  dplyr::mutate(
+    Pl = if_else( 
+      str_detect(pattern = "P",string= mod), 
+      "1", "0"),
+    L = if_else( 
+      str_detect(pattern = "L", string = mod), 
+      "1", "0"),
+    mod = case_when(
+        mod == "P" ~ "Pl",
+        mod == "P+L" ~ "Pl+L",
+        .default = mod
+      ),
+    .after = "mod"
+  ) %>% 
+  filter(!is.na(f_b_ratio))
+
+model.ory <- 
+  lmer(data = data.fb.vory, 
+       formula = "f_b_ratio ~ Pl + L + (1 | Bloc)", 
+       na.action = "na.fail")
+
+
+```
+
+## f:b
+
+```{r data-fb-basals}
+data.fb.basal <- 
+  complete_fluxes %>% 
+  filter(Numero != 1 & Numero !=7) %>% 
+  filter(node_type_to == "microbes")  %>% 
+  dplyr::mutate(flux_type = case_when(
+    flux_type == "som.decomp" ~ "SOM decomp.",
+    flux_type == "litter.decomp" ~ "Litter decomp.",
+    flux_type == "rhizoflux" ~ "Rhizoflux"
+  )) %>% 
+  select(- c(trophic_level_from, node_type_from)) %>% 
+  pivot_wider(names_from = To, values_from = Flux) %>% 
+  rowwise() %>% 
+  dplyr::mutate(bact = sum(c(B.Gpos,B.Gneg)),
+                fung = sum(F.s, F.amf)
+  ) %>% 
+  ungroup() %>% 
+  select(1:7, bact, fung) %>% 
+  dplyr::mutate(fb_ratio = fung/bact)  %>% 
+  dplyr::mutate(
+    Sp = if_else(is.na(Sp), "C", Sp),
+    Pl = if_else( 
+      condition = str_detect(pattern = "P", string = mod), 
+      true = "1", false= "0"),
+    L = if_else( 
+      str_detect(pattern = "L", string = mod), 
+      "1", "0"),
+    .after = "mod"
+  ) %>% 
+  select(-bact, -fung) %>% 
+  group_by(mod, gf, flux_type) %>% 
+  dplyr::mutate(fb_ratio = if_else(is_extreme(fb_ratio), 
+                                   NA, fb_ratio)) %>% 
+  drop_na(fb_ratio) %>% 
+  ungroup()
+
+
+#SOM
+data.SOM <- data.fb.basal %>% 
+  filter(flux_type == "SOM decomp.")
+model.SOM <- 
+  lmer(data = 
+         data.SOM, 
+       formula = "fb_ratio ~ Pl + L + (1 | Bloc)", 
+       na.action = "na.fail")
+
+#rhizo
+data.rhizo <- data.fb.basal %>% 
+  filter(flux_type == "Rhizoflux")
+model.rhizo <- 
+  lmer(data = 
+         data.rhizo, 
+       formula = "fb_ratio ~ L + (1 | Bloc)", 
+       na.action = "na.fail")
+
+#LIT
+data.lit <- data.fb.basal %>% 
+  filter(flux_type == "Litter decomp.")
+
+model.lit <- 
+  lmer(data = 
+         data.lit, 
+       formula = "fb_ratio ~ Pl + (1 | Bloc)", 
+       na.action = "na.fail")
+
+#BILAN
+models.fig.3 <- list(model.lit, model.SOM, model.rhizo, model.ory)
+names(models.fig.3) <- c("Litter decomp.", "SOM decomp.", "Rhizoflux", "FBory")
+
+summarise_coefs(models.fig.3)
+
+sumR2m(models.fig.3)
+
+```
+
+
+# FB ratio in relation to PES
+
+```{r data.model.fbory.log.sc}
+data.model.fb.log.sc <- 
+  data.fb.basal %>%
+  bind_rows(data.fb.vory %>% 
+              dplyr::mutate(flux_type = "Microbivory") %>% 
+              dplyr::rename(fb_ratio = f_b_ratio)) %>% 
+  select(-node_type_to, - gf, -mod) %>% 
+  dplyr::group_by(flux_type) %>% 
+  dplyr::mutate(fb_ratio = scale(log(fb_ratio))) %>% 
+  ungroup() %>% 
+  pivot_wider(names_from = flux_type, values_from = fb_ratio) %>% 
+  
+  left_join(data.strat.log.sc %>% 
+              select(1:11, - gf, -mod)) %>% 
+  left_join(data.lit.log.sc %>% 
+              select(c(1:2, 17:last_col())))
+
+resp.vars.fb.C <- c("Microbivory", "`SOM decomp.`")
+resp.vars.fb.L <- c("`Litter decomp.`")
+resp.vars.fb.P <- c("Rhizoflux")
+
+```
+
+
+
+### Litter prop
+
+```{r formula-fb-lit}
+
+lm.form.lit.fb.P <- 
+  lapply(resp.vars.fb.P, 
+         function(RV) {
+           str_c(RV, "~ dim1.rot + dim2.rot + (1|Bloc)") # formula f
+         }
+  ) 
+
+lm.form.lit.fb.CL <- 
+  lapply(c(resp.vars.fb.C, resp.vars.fb.L), 
+         function(RV) {
+           str_c(RV, "~ Pl + dim1.rot + dim2.rot + (1|Bloc)")
+         }
+  )
+
+```
+
+
+```{r models-lit-fb}
+
+# Var control and litter -----------------------------------------
+models.lit.fb.CL <- 
+  purrr::map(lm.form.lit.fb.CL %>% unlist(recursive =F), ~ {
+    #print(.x)
+    data.subset <- 
+      data.model.fb.log.sc %>% 
+      select(
+        colnames(data.model.fb.log.sc)[str_detect(
+          pattern = colnames(data.model.fb.log.sc), 
+          string = .x
+        ) == T]
+      ) %>% 
+      drop_na()
+    
+    # Fit the model using lmer
+    model <- lmer(as.formula(.x), 
+                  data = data.subset, na.action = "na.fail",
+                  REML = TRUE
+    ) 
+  }) 
+
+
+# Var plants -----------------------------------------
+models.lit.fb.P <- 
+  purrr::map(lm.form.lit.fb.P %>% unlist(recursive =F), ~ {
+    #print(.x)
+    data.subset <- 
+      data.model.fb.log.sc %>% 
+      filter(Pl==1) %>% 
+      select(
+        colnames(data.model.fb.log.sc)[str_detect(
+          pattern = colnames(data.model.fb.log.sc), 
+          string = .x
+        ) == T]
+      ) %>% 
+      drop_na()
+    # Fit the model using lmer
+    model <- lmer(as.formula(.x), 
+                  data = data.subset, na.action = "na.fail",
+                  REML = TRUE
+    )
+    
+  }) 
+
+models.lit.fb <- 
+  c(models.lit.fb.CL, models.lit.fb.P)
+names(models.lit.fb) <- c(lm.form.lit.fb.CL %>% unlist(recursive =F), lm.form.lit.fb.P %>% unlist(recursive =F))
+```
+
+```{r sum-coefs-lit-fb}
+
+# Var control and litter -----------------------------------------
+sum.coefs.lit.fb.CL <- 
+  purrr::map(lm.form.lit.fb.CL %>% unlist(recursive =F), ~ {
+    #print(.x)
+    data.subset <- 
+      data.model.fb.log.sc %>% 
+      select(
+        colnames(data.model.fb.log.sc)[str_detect(
+          pattern = colnames(data.model.fb.log.sc), 
+          string = .x
+        ) == T]
+      ) %>% 
+      drop_na()
+    
+    # Fit the model using lmer
+    model <- lmer(as.formula(.x), 
+                  data = data.subset, na.action = "na.fail",
+                  REML = TRUE
+    ) 
+    coef(summary(model)) %>%
+      as_tibble(rownames = "Parameter")  %>%
+      left_join(
+        confint(model)%>%
+          as_tibble(rownames = "Parameter")
+      ) %>%
+      add_column(Formula = .x,
+                 .before =1) %>%
+      separate_wider_delim(cols = Formula, delim = "~", names = c("RespV", "Formula")) %>% 
+      dplyr::rename(CI.inf = `2.5 %`,
+                    CI.sup = `97.5 %`,
+                    p = `Pr(>|t|)`)
+  }) 
+
+
+# Var plants -----------------------------------------
+sum.coefs.lit.fb.P <- 
+  purrr::map(lm.form.lit.fb.P %>% unlist(recursive =F), ~ {
+    #print(.x)
+    data.subset <- 
+      data.model.fb.log.sc %>% 
+      filter(Pl==1) %>% 
+      select(
+        colnames(data.model.fb.log.sc)[str_detect(
+          pattern = colnames(data.model.fb.log.sc), 
+          string = .x
+        ) == T]
+      ) %>% 
+      drop_na()
+    # Fit the model using lmer
+    model <- lmer(as.formula(.x), 
+                  data = data.subset, na.action = "na.fail",
+                  REML = TRUE
+    ) 
+    coef(summary(model)) %>%
+      as_tibble(rownames = "Parameter")  %>%
+      left_join(
+        confint(model)%>%
+          as_tibble(rownames = "Parameter")
+      ) %>%
+      add_column(Formula = .x,
+                 .before =1) %>%
+      separate_wider_delim(cols = Formula, delim = "~", names = c("RespV", "Formula")) %>% 
+      dplyr::rename(CI.inf = `2.5 %`,
+                    CI.sup = `97.5 %`,
+                    p = `Pr(>|t|)`)
+    
+  }) 
+
+sum.coefs.lit.fb <- 
+  sum.coefs.lit.fb.CL %>% 
+  bind_rows(sum.coefs.lit.fb.P) %>% 
+  mutate(contains0 = if_else(CI.inf * CI.sup > 0, "no", "yes"),
+         signif = case_when(
+           p < 0.001 ~ "***",
+           p < 0.01 ~ "**",
+           p < 0.05 ~ "*", 
+           p < 0.1 ~ "·"
+         )) 
+```
+
+
+```{r plot-lit}
+sum.coefs.lit.fb %>% 
+  filter(Parameter != "(Intercept)") %>% 
+  ggplot(aes(x = Parameter, y = Estimate))+
+  facet_grid("f:b ratios"~RespV)+
+  geom_hline(yintercept = 0, linetype = "dashed")+
+  geom_text(aes(y = Estimate, 
+                label=signif, 
+                alpha = contains0),
+            nudge_x = .1)+
+  geom_pointrange(
+    aes(
+      alpha = contains0,
+      ymin = CI.inf, ymax = CI.sup)
+  )+
+  #scale_color_manual(values = palette_traits)+
+  scale_alpha_discrete(range = c(1, 0.3)) +
+  #scale_color_manual(values= c("yes" = "grey", "no" = "black"))+
+  theme_light()+
+  coord_flip()
+
+sum.coefs.lit.fb %>%
+  filter(Parameter == "dim1.rot") %>% 
+  rowwise() %>% 
+  dplyr::mutate(dif = if_else(
+    cond = Estimate*CI.inf > 0, 
+    true = max(abs(Estimate), abs(CI.inf)) - 
+      min(abs(Estimate), abs(CI.inf)),
+    false = Estimate - CI.inf
+  ),
+  text = 
+    paste0(
+      round(Estimate, 2), 
+      " ± ",
+      round(dif, 2)
+    )
+  ) %>% 
+  select(RespV, text, p)
+
+sumR2m(models.lit.fb)
+```
+
+
+## Plant traits
+
+```{r lm-form-strat-fb}
+
+lm.form.strat.fb.L <- 
+  lapply(resp.vars.fb.L, 
+         function(RV) {
+           str_c(RV, "~ PerColAMF + AGR + (1|Bloc)") # formula f
+         }
+  ) 
+
+lm.form.strat.fb.CP <- 
+  lapply(c(resp.vars.fb.C, resp.vars.fb.P), 
+         function(RV) {
+           str_c(RV, "~ L + PerColAMF + AGR + (1|Bloc)")
+         }
+  )
+```
+
+
+```{r models-strat-fb}
+
+# Var control and plants -----------------------------------------
+models.strat.fb.CP <- 
+  purrr::map(lm.form.strat.fb.CP %>% unlist(recursive = F), ~ {
+     print(.x)
+    data.subset <- 
+      data.model.fb.log.sc %>% 
+      select(
+        colnames(data.model.fb.log.sc)[str_detect(
+          pattern = colnames(data.model.fb.log.sc), 
+          string = .x
+        ) == T], -P #take away litter phosphorus 
+      ) %>% 
+      drop_na()
+    print(data.subset)
+    
+    # Fit the model using lmer
+    model <- lmer(as.formula(.x), 
+                  data = data.subset, na.action = "na.fail",
+                  REML = TRUE
+    ) 
+  }) 
+
+# Var litter -----------------------------------------
+models.strat.fb.L <- 
+  purrr::map(lm.form.strat.fb.L %>% unlist(recursive = F), ~ {
+    #print(.x)
+    data.subset <- 
+      data.model.fb.log.sc %>% 
+      select(
+        colnames(data.model.fb.log.sc)[str_detect(
+          pattern = colnames(data.model.fb.log.sc), 
+          string = .x
+        ) == T], -P #take away litter phosphorus 
+      ) %>% 
+      drop_na()
+    
+    # Fit the model using lmer
+    model <- lmer(as.formula(.x), 
+                  data = data.subset, na.action = "na.fail",
+                  REML = TRUE
+    ) 
+  }) 
+
+models.strat.fb <- c(models.strat.fb.CP, models.strat.fb.L)
+names(models.strat.fb) <- c(lm.form.strat.fb.CP %>% unlist(recursive =F), lm.form.strat.fb.L %>% unlist(recursive =F))
+```
+
+
+```{r sum-coefs-strat}
+
+# Var control and plants -----------------------------------------
+sum.coefs.strat.fb.CP <- 
+  purrr::map(lm.form.strat.fb.CP %>% unlist(recursive = F), ~ {
+    # print(.x)
+    data.subset <- 
+      data.model.fb.log.sc %>% 
+      select(
+        colnames(data.model.fb.log.sc)[str_detect(
+          pattern = colnames(data.model.fb.log.sc), 
+          string = .x
+        ) == T], -P #take away litter phosphorus 
+      ) %>% 
+      drop_na()
+    
+    # Fit the model using lmer
+    model <- lmer(as.formula(.x), 
+                  data = data.subset, na.action = "na.fail",
+                  REML = TRUE
+    ) 
+    coef(summary(model)) %>%
+      as_tibble(rownames = "Parameter")  %>%
+      left_join(
+        confint(model)%>%
+          as_tibble(rownames = "Parameter")
+      ) %>%
+      add_column(Formula = .x,
+                 .before =1) %>%
+      separate_wider_delim(cols = Formula, delim = "~", names = c("RespV", "Formula")) %>% 
+      dplyr::rename(CI.inf = `2.5 %`,
+                    CI.sup = `97.5 %`,
+                    p = `Pr(>|t|)`)
+  }) 
+
+# Var litter -----------------------------------------
+sum.coefs.strat.fb.L <- 
+  purrr::map(lm.form.strat.fb.L %>% unlist(recursive = F), ~ {
+    #print(.x)
+    data.subset <- 
+      data.model.fb.log.sc %>% 
+      select(
+        colnames(data.model.fb.log.sc)[str_detect(
+          pattern = colnames(data.model.fb.log.sc), 
+          string = .x
+        ) == T], -P #take away litter phosphorus 
+      ) %>% 
+      drop_na()
+    
+    # Fit the model using lmer
+    model <- lmer(as.formula(.x), 
+                  data = data.subset, na.action = "na.fail",
+                  REML = TRUE
+    ) 
+    coef(summary(model)) %>%
+      as_tibble(rownames = "Parameter")  %>%
+      left_join(
+        confint(model)%>%
+          as_tibble(rownames = "Parameter")
+      ) %>%
+      add_column(Formula = .x,
+                 .before =1) %>%
+      separate_wider_delim(cols = Formula, delim = "~", names = c("RespV", "Formula")) %>% 
+      dplyr::rename(CI.inf = `2.5 %`,
+                    CI.sup = `97.5 %`,
+                    p = `Pr(>|t|)`)
+  }) 
+
+sum.coefs.strat.fb <- 
+  sum.coefs.strat.fb.CP %>% 
+  bind_rows(sum.coefs.strat.fb.L) %>% 
+  mutate(contains0 = if_else(CI.inf * CI.sup > 0, "no", "yes"),
+         signif = case_when(
+           p < 0.001 ~ "***",
+           p < 0.01 ~ "**",
+           p < 0.05 ~ "*", 
+           p < 0.1 ~ "·"
+         )) 
+```
+
+
+```{r plot-strat}
+sum.coefs.strat.fb %>% 
+  filter(Parameter != "(Intercept)") %>% 
+  ggplot(aes(x = Parameter, y = Estimate))+
+  facet_grid("fb_ratios"~RespV)+
+  geom_hline(yintercept = 0, linetype = "dashed")+
+  geom_text(aes(y = Estimate, 
+                label=signif, 
+                alpha = contains0),
+            nudge_x = .1)+
+  geom_pointrange(
+    aes(
+      alpha = contains0,
+      ymin = CI.inf, ymax = CI.sup)
+  )+
+  #scale_color_manual(values = palette_traits)+
+  scale_alpha_discrete(range = c(1, 0.3)) +
+  scale_color_manual(values= c("yes" = "grey"))+
+  theme_light()+
+  coord_flip()
+
+sum.coefs.strat.fb
+```
+
+```{r plot-fb}
+
+plot_grid(vis_coefs3(sum.coefs.lit.fb, 
+                    models.lit.fb, 
+                    my.grid = "LITTER QUALITY"), 
+          vis_coefs3(sum.coefs.strat.fb, 
+                    models.strat.fb,
+                    my.grid = "PLANT STRATEGY"),
+          ncol = 1,
+          labels = "AUTO",
+          axis =  "tblr",
+          align = "hv")
+
+sumR2m(models.lit.fb)
+sum.coefs.lit.fb %>% 
+  filter(Parameter!="(Intercept)" & contains0 == "no") %>% 
+  mutate(IC_dif = if_else(Estimate > 0,
+                          CI.sup - Estimate,
+                          abs(CI.inf) - abs(Estimate))
+  ) %>% 
+  
+  
+sumR2m(models.strat.fb)
+```
+
+
+
+
+# Save
+
+```{r}
+
+save(data.fb.basal, data.fb.vory, file = "object/data.fb.Rdata")
+
+save(
+  table.models.log.sc, models.log.sc,
+  models.lit, models.strat, 
+  sum.coefs.lit, sum.coefs.strat,
+  sum.coefs.lit.fb, sum.coefs.strat.fb,
+  models.strat.fb, models.lit.fb,
+  models.fig.3,
+     file = "object/models.Rdata")
+
+sumR2m(models.strat.fb)
+```
+
